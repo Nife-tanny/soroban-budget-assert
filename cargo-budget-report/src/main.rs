@@ -1006,8 +1006,9 @@ fn main() -> Result<()> {
                 ])
                 .context("Failed to write CSV header")?;
             for report in &reports {
-                let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();                    let reason_str = report.failure_reason.as_deref().unwrap_or_default();
-                    csv_writer
+                let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();
+                let reason_str = report.failure_reason.as_deref().unwrap_or_default();
+                csv_writer
                     .write_record([
                         report.status,
                         report.package.as_str(),
