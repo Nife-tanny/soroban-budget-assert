@@ -304,7 +304,13 @@ mod off_by_one_and_zero_length_tests {
             read_limit: Some(1_000),
             write_limit: Some(500),
         };
-        emit_check_failure_entries(&mut reports, "my-pkg", "do_work", &config);
+        emit_check_failure_entries(
+            &mut reports,
+            "my-pkg",
+            "do_work",
+            "simulation failed",
+            Some(&config),
+        );
         assert_eq!(reports.len(), 3);
     }
 
@@ -317,7 +323,13 @@ mod off_by_one_and_zero_length_tests {
             read_limit: None,
             write_limit: Some(500),
         };
-        emit_check_failure_entries(&mut reports, "my-pkg", "do_work", &config);
+        emit_check_failure_entries(
+            &mut reports,
+            "my-pkg",
+            "do_work",
+            "simulation failed",
+            Some(&config),
+        );
         for r in &reports {
             assert_eq!(r.package, "my-pkg");
             assert_eq!(r.function, "do_work");
@@ -330,7 +342,7 @@ mod off_by_one_and_zero_length_tests {
     fn emit_check_failure_entries_handles_empty_function_name() {
         let mut reports = Vec::new();
         let config = FunctionConfig::default();
-        emit_check_failure_entries(&mut reports, "pkg", "", &config);
+        emit_check_failure_entries(&mut reports, "pkg", "", "simulation failed", None);
         assert_eq!(reports.len(), 3);
         assert_eq!(reports[0].function, "");
     }
@@ -339,7 +351,7 @@ mod off_by_one_and_zero_length_tests {
     fn emit_check_failure_entries_handles_empty_package_name() {
         let mut reports = Vec::new();
         let config = FunctionConfig::default();
-        emit_check_failure_entries(&mut reports, "", "do_work", &config);
+        emit_check_failure_entries(&mut reports, "", "do_work", "simulation failed", None);
         assert_eq!(reports.len(), 3);
         assert_eq!(reports[0].package, "");
     }
@@ -350,33 +362,55 @@ mod off_by_one_and_zero_length_tests {
     fn reports_to_csv(reports: &[CostReport], check: bool) -> String {
         let mut wtr = csv::Writer::from_writer(vec![]);
         if check {
-            wtr.write_record(["package", "function", "metric", "value", "limit", "pass"])
-                .unwrap();
+            wtr.write_record([
+                "status",
+                "package",
+                "function",
+                "metric",
+                "value",
+                "failure_reason",
+                "limit",
+                "pass",
+            ])
+            .unwrap();
             for r in reports {
                 let value_str = r.value.map(|v| v.to_string()).unwrap_or_default();
+                let reason_str = r.failure_reason.as_deref().unwrap_or_default();
                 let limit_str = r.limit.map(|l| l.to_string()).unwrap_or_default();
                 let pass_str = r.pass.map(|p| p.to_string()).unwrap_or_default();
                 wtr.write_record([
+                    r.status,
                     r.package.as_str(),
                     r.function.as_str(),
                     r.metric,
                     value_str.as_str(),
+                    reason_str,
                     limit_str.as_str(),
                     pass_str.as_str(),
                 ])
                 .unwrap();
             }
         } else {
-            wtr.write_record(["package", "function", "metric", "value"])
-                .unwrap();
+            wtr.write_record([
+                "status",
+                "package",
+                "function",
+                "metric",
+                "value",
+                "failure_reason",
+            ])
+            .unwrap();
             for r in reports {
-                if r.value.is_some() {
+                if r.value.is_some() || r.status == "failed" {
                     let value_str = r.value.map(|v| v.to_string()).unwrap_or_default();
+                    let reason_str = r.failure_reason.as_deref().unwrap_or_default();
                     wtr.write_record([
+                        r.status,
                         r.package.as_str(),
                         r.function.as_str(),
                         r.metric,
                         value_str.as_str(),
+                        reason_str,
                     ])
                     .unwrap();
                 }
@@ -389,41 +423,48 @@ mod off_by_one_and_zero_length_tests {
     #[test]
     fn csv_output_with_zero_value_indicates_zero_resource_usage() {
         let reports = vec![CostReport {
+            status: "success",
             package: "my-contract".to_string(),
             function: "do_work".to_string(),
             metric: "CPU Instructions",
             value: Some(0),
+            failure_reason: None,
             limit: None,
             pass: None,
         }];
         let csv = reports_to_csv(&reports, false);
-        assert!(csv.contains(",0\n") || csv.contains(",0\r\n"));
+        assert!(csv.contains(",0,"));
     }
 
     #[test]
     fn csv_output_with_check_zero_value_passes_zero_limit() {
         let reports = vec![CostReport {
+            status: "success",
             package: "my-contract".to_string(),
             function: "do_work".to_string(),
             metric: "CPU Instructions",
             value: Some(0),
+            failure_reason: None,
             limit: Some(0),
             pass: Some(true),
         }];
         let csv = reports_to_csv(&reports, true);
-        assert!(csv.contains(",0,0,true"));
+        assert!(csv.contains("0,,0,true"));
     }
 
     #[test]
     fn csv_output_zero_reports_produces_header_only() {
         let csv = reports_to_csv(&[], false);
-        assert_eq!(csv, "package,function,metric,value\n");
+        assert_eq!(csv, "status,package,function,metric,value,failure_reason\n");
     }
 
     #[test]
     fn csv_output_check_zero_reports_produces_header_only() {
         let csv = reports_to_csv(&[], true);
-        assert_eq!(csv, "package,function,metric,value,limit,pass\n");
+        assert_eq!(
+            csv,
+            "status,package,function,metric,value,failure_reason,limit,pass\n"
+        );
     }
 
     // ── scaffold_init edge case tests ──────────────────────────────────
@@ -742,7 +783,13 @@ write_limit = 0
             read_limit: None,
             write_limit: Some(500),
         };
-        emit_check_failure_entries(&mut reports, "pkg", "fn", &config);
+        emit_check_failure_entries(
+            &mut reports,
+            "pkg",
+            "fn",
+            "simulation failed",
+            Some(&config),
+        );
         assert_eq!(reports.len(), 3);
         // Must be emitted in order: CPU, Read, Write.
         assert_eq!(reports[0].metric, "CPU Instructions");
@@ -761,7 +808,7 @@ write_limit = 0
     fn emit_check_failure_entries_all_limits_none() {
         let mut reports = Vec::new();
         let config = FunctionConfig::default();
-        emit_check_failure_entries(&mut reports, "pkg", "fn", &config);
+        emit_check_failure_entries(&mut reports, "pkg", "fn", "simulation failed", None);
         assert_eq!(reports.len(), 3);
         for r in &reports {
             assert_eq!(r.limit, None);
