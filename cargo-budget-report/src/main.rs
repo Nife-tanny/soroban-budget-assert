@@ -978,10 +978,7 @@ fn main() -> Result<()> {
                 .context("Failed to write CSV header")?;
             for report in &reports {
                 let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();
-                let reason_str = report
-                    .failure_reason
-                    .as_deref()
-                    .unwrap_or_default();
+                let reason_str = report.failure_reason.as_deref().unwrap_or_default();
                 let limit_str = report.limit.map(|lim| lim.to_string()).unwrap_or_default();
                 let pass_str = report.pass.map(|p| p.to_string()).unwrap_or_default();
                 csv_writer
@@ -1009,12 +1006,8 @@ fn main() -> Result<()> {
                 ])
                 .context("Failed to write CSV header")?;
             for report in &reports {
-                let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();
-                let reason_str = report
-                    .failure_reason
-                    .as_deref()
-                    .unwrap_or_default();
-                csv_writer
+                let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();                    let reason_str = report.failure_reason.as_deref().unwrap_or_default();
+                    csv_writer
                     .write_record([
                         report.status,
                         report.package.as_str(),
@@ -1066,10 +1059,7 @@ fn main() -> Result<()> {
         if !failure_entries.is_empty() {
             println!("\n--- FAILED SIMULATIONS ---");
             for entry in &failure_entries {
-                let reason = entry
-                    .failure_reason
-                    .as_deref()
-                    .unwrap_or("unknown error");
+                let reason = entry.failure_reason.as_deref().unwrap_or("unknown error");
                 println!(
                     "  {}::{} — simulation failed: {}",
                     entry.package, entry.function, reason
@@ -1637,10 +1627,7 @@ write_limit = 1000
                 .unwrap();
             for report in reports {
                 let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();
-                let reason_str = report
-                    .failure_reason
-                    .as_deref()
-                    .unwrap_or_default();
+                let reason_str = report.failure_reason.as_deref().unwrap_or_default();
                 let limit_str = report.limit.map(|lim| lim.to_string()).unwrap_or_default();
                 let pass_str = report.pass.map(|p| p.to_string()).unwrap_or_default();
                 csv_writer
@@ -1673,10 +1660,7 @@ write_limit = 1000
                 // Entries with neither (stale check-only stubs) are excluded.
                 if report.value.is_some() || report.status == "failed" {
                     let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();
-                    let reason_str = report
-                        .failure_reason
-                        .as_deref()
-                        .unwrap_or_default();
+                    let reason_str = report.failure_reason.as_deref().unwrap_or_default();
                     csv_writer
                         .write_record([
                             report.status,
