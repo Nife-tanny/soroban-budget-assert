@@ -341,7 +341,6 @@ mod off_by_one_and_zero_length_tests {
     #[test]
     fn emit_check_failure_entries_handles_empty_function_name() {
         let mut reports = Vec::new();
-        let config = FunctionConfig::default();
         emit_check_failure_entries(&mut reports, "pkg", "", "simulation failed", None);
         assert_eq!(reports.len(), 3);
         assert_eq!(reports[0].function, "");
@@ -350,7 +349,6 @@ mod off_by_one_and_zero_length_tests {
     #[test]
     fn emit_check_failure_entries_handles_empty_package_name() {
         let mut reports = Vec::new();
-        let config = FunctionConfig::default();
         emit_check_failure_entries(&mut reports, "", "do_work", "simulation failed", None);
         assert_eq!(reports.len(), 3);
         assert_eq!(reports[0].package, "");
@@ -807,7 +805,6 @@ write_limit = 0
     #[test]
     fn emit_check_failure_entries_all_limits_none() {
         let mut reports = Vec::new();
-        let config = FunctionConfig::default();
         emit_check_failure_entries(&mut reports, "pkg", "fn", "simulation failed", None);
         assert_eq!(reports.len(), 3);
         for r in &reports {
