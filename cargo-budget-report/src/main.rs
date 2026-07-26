@@ -188,16 +188,27 @@ struct FunctionConfig {
 ///
 /// In `--check` mode the `limit` and `pass` fields are populated so that
 /// consumers (table, JSON, CSV) can render per-metric pass/fail status.
+///
+/// The `status` field explicitly distinguishes successful measurements
+/// (`"success"`) from failures (`"failed"`) so that JSON consumers can
+/// easily filter without inferring from the presence or absence of `value`.
+/// The `failure_reason` field carries a human-readable description when
+/// simulation could not produce a measurement.
 #[derive(Serialize)]
 struct CostReport {
+    /// `"success"` if the simulation produced a measurement, `"failed"`
+    /// otherwise.
+    status: &'static str,
     package: String,
     function: String,
     metric: &'static str,
-    /// The measured value, or `None` if the simulation failed to produce one
-    /// (only emitted in `--check` mode for functions declared in
-    /// `budget.toml`).
+    /// The measured value, or `None` if the simulation failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<u32>,
+    /// Human-readable failure reason, present only when `status` is
+    /// `"failed"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_reason: Option<String>,
     /// Configured upper bound for the metric, if any. Emitted in `--check`
     /// mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -212,8 +223,8 @@ struct CostReport {
 /// A `CostReport` formatted for rendering in the plain-text [`Table`] output.
 ///
 /// Only rows with a measured value (`value.is_some()`) are included in the
-/// table; simulation failures and `--check`-only stubs are filtered out
-/// before this type is constructed.
+/// table; simulation failures and `--check`-only stubs appear below the table
+/// as explicit failure notes.
 #[derive(Tabled)]
 struct TableCostReport {
     package: String,
@@ -247,33 +258,28 @@ fn evaluate_check(value: u32, limit: Option<u64>) -> (Option<u64>, Option<bool>)
     }
 }
 
-/// Emit one stub `CostReport` per metric (`CPU Instructions`, `Read Bytes`,
-/// `Write Bytes`) so that the `--check` JSON output and check summary make
-/// the failure visible per metric.
+/// Emit one `CostReport` per metric (`CPU Instructions`, `Read Bytes`,
+/// `Write Bytes`) for a simulation failure in `--check` mode.
 ///
-/// * Metrics with a configured `*_limit` get `value: None, limit: Some(n),
-///   pass: Some(false)` — the consumer can read the breached limit.
-/// * Metrics without a configured limit get `value: None, limit: None,
-///   pass: Some(false)` — still a hook for `--check --json` consumers, but
-///   the table filter (`value.is_some()`) keeps it out of the plain-text
-///   report and the summary lines remain unchanged.
-///
-/// The caller has already set the `checks_failed` flag for the function as a
-/// whole, so emitting one entry per metric — even metrics without a limit —
-/// does not change the exit-code semantics.
+/// Each entry is tagged `status: "failed"`, carries the `failure_reason`,
+/// and has `pass: Some(false)` so the check summary counts it. Metrics
+/// with a configured `*_limit` also carry the limit value.
 fn emit_check_failure_entries(
     reports: &mut Vec<CostReport>,
     package_name: &str,
     function: &str,
-    func_config: &FunctionConfig,
+    failure_reason: &str,
+    func_config: Option<&FunctionConfig>,
 ) {
     for metric in ["CPU Instructions", "Read Bytes", "Write Bytes"] {
-        let limit = limit_for_metric(func_config, metric);
+        let limit = func_config.and_then(|cfg| limit_for_metric(cfg, metric));
         reports.push(CostReport {
+            status: "failed",
             package: package_name.to_string(),
             function: function.to_string(),
             metric,
             value: None,
+            failure_reason: Some(failure_reason.to_string()),
             limit,
             pass: Some(false),
         });
@@ -352,6 +358,26 @@ enum SimulationFailure {
     Rpc(String),
     /// The RPC response didn't contain a decodable `SorobanTransactionData`.
     MetricsExtraction(String),
+}
+
+impl SimulationFailure {
+    /// Returns a human-readable label for the failure category.
+    fn label(&self) -> &'static str {
+        match self {
+            SimulationFailure::Invoke(_) => "invoke failed",
+            SimulationFailure::Rpc(_) => "RPC error",
+            SimulationFailure::MetricsExtraction(_) => "metrics extraction failed",
+        }
+    }
+
+    /// Returns the failure detail string.
+    fn detail(&self) -> &str {
+        match self {
+            SimulationFailure::Invoke(d) => d.as_str(),
+            SimulationFailure::Rpc(d) => d.as_str(),
+            SimulationFailure::MetricsExtraction(d) => d.as_str(),
+        }
+    }
 }
 
 /// Outcome of simulating one exported function.
@@ -727,6 +753,8 @@ fn main() -> Result<()> {
     let mut reports = Vec::new();
     let mut has_errors = false;
     let mut checks_failed = false;
+    let mut simulated_count: usize = 0;
+    let mut failed_count: usize = 0;
 
     for package in metadata.packages {
         let is_cdylib = package
@@ -836,6 +864,7 @@ fn main() -> Result<()> {
                     read_bytes,
                     write_bytes,
                 } => {
+                    simulated_count += 1;
                     // Build three CostReport entries for this function. In
                     // --check mode, attach the configured limit and
                     // pass/fail to each entry.
@@ -851,10 +880,12 @@ fn main() -> Result<()> {
                             checks_failed = true;
                         }
                         reports.push(CostReport {
+                            status: "success",
                             package: package.name.to_string(),
                             function: function.clone(),
                             metric,
                             value: Some(value),
+                            failure_reason: None,
                             limit: entry_limit,
                             pass,
                         });
@@ -862,46 +893,66 @@ fn main() -> Result<()> {
                 }
                 SimulationOutcome::Failed(failure) => {
                     has_errors = true;
+                    failed_count += 1;
+                    let failure_reason = format!("{}: {}", failure.label(), failure.detail());
+
                     if !args.quiet {
-                        match &failure {
-                            SimulationFailure::Invoke(stderr) => {
-                                eprintln!(
-                                    "Warning: Simulation failed for {}: {}",
-                                    function, stderr
-                                );
-                            }
-                            SimulationFailure::Rpc(error) => {
-                                eprintln!("Warning: RPC error for {}: {}", function, error);
-                            }
-                            SimulationFailure::MetricsExtraction(err) => {
-                                eprintln!(
-                                    "Warning: Failed to extract metrics for {}: {}",
-                                    function, err
-                                );
-                            }
-                        }
+                        eprintln!(
+                            "Warning: {} simulation failed for {}: {}",
+                            failure.label(),
+                            function,
+                            failure.detail()
+                        );
                     }
-                    if let (true, Some(function_config)) = (args.check, func_config) {
-                        // A configured function that won't simulate cannot
-                        // satisfy any of its declared limits; record this as
-                        // a check failure even if no `*_limit` is set on
-                        // this row of budget.toml.
+
+                    if args.check {
+                        // In --check mode every simulated function matters.
+                        // Emit per-metric failure entries so the check
+                        // summary can count them; configured limits are
+                        // attached when present.
                         checks_failed = true;
                         emit_check_failure_entries(
                             &mut reports,
                             &package.name,
                             &function,
-                            function_config,
+                            &failure_reason,
+                            func_config,
                         );
+                    } else {
+                        // Without --check, emit a single entry per
+                        // function so it appears in JSON and as a failure
+                        // note in the table output. A single entry keeps
+                        // the output concise while still making the
+                        // failure visible.
+                        reports.push(CostReport {
+                            status: "failed",
+                            package: package.name.to_string(),
+                            function: function.clone(),
+                            metric: "<simulation>",
+                            value: None,
+                            failure_reason: Some(failure_reason),
+                            limit: None,
+                            pass: None,
+                        });
                     }
                 }
             }
         }
     }
 
-    if reports.is_empty() {
+    // ── Empty report guard ─────────────────────────────────────────────
+    // If the report is empty it means no package produced any functions
+    // at all (WASM missing, no exports, etc.).  In that case we bail
+    // early so that the output (table / CSV / JSON) is a meaningful
+    // "nothing to report" rather than an empty document.
+    //
+    // Note: the `simulated_count` and `failed_count` only track
+    // functions that were actually discovered and attempted.  Packages
+    // whose WASM could not be found contribute to package-level
+    // preconditions and are handled separately.
+    if reports.is_empty() && simulated_count == 0 && failed_count == 0 {
         if !args.quiet {
-            eprintln!("No successful simulations to report.");
+            eprintln!("No simulations to report.");
         }
         if has_errors || (args.check && checks_failed) {
             std::process::exit(1);
@@ -909,22 +960,38 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ── CSV output ─────────────────────────────────────────────────────
     if args.csv {
         let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
         if args.check {
             csv_writer
-                .write_record(["package", "function", "metric", "value", "limit", "pass"])
+                .write_record([
+                    "status",
+                    "package",
+                    "function",
+                    "metric",
+                    "value",
+                    "failure_reason",
+                    "limit",
+                    "pass",
+                ])
                 .context("Failed to write CSV header")?;
             for report in &reports {
                 let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();
+                let reason_str = report
+                    .failure_reason
+                    .as_deref()
+                    .unwrap_or_default();
                 let limit_str = report.limit.map(|lim| lim.to_string()).unwrap_or_default();
                 let pass_str = report.pass.map(|p| p.to_string()).unwrap_or_default();
                 csv_writer
                     .write_record([
+                        report.status,
                         report.package.as_str(),
                         report.function.as_str(),
                         report.metric,
                         value_str.as_str(),
+                        reason_str,
                         limit_str.as_str(),
                         pass_str.as_str(),
                     ])
@@ -932,31 +999,47 @@ fn main() -> Result<()> {
             }
         } else {
             csv_writer
-                .write_record(["package", "function", "metric", "value"])
+                .write_record([
+                    "status",
+                    "package",
+                    "function",
+                    "metric",
+                    "value",
+                    "failure_reason",
+                ])
                 .context("Failed to write CSV header")?;
             for report in &reports {
-                if report.value.is_some() {
-                    let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();
-                    csv_writer
-                        .write_record([
-                            report.package.as_str(),
-                            report.function.as_str(),
-                            report.metric,
-                            value_str.as_str(),
-                        ])
-                        .context("Failed to write CSV record")?;
-                }
+                let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();
+                let reason_str = report
+                    .failure_reason
+                    .as_deref()
+                    .unwrap_or_default();
+                csv_writer
+                    .write_record([
+                        report.status,
+                        report.package.as_str(),
+                        report.function.as_str(),
+                        report.metric,
+                        value_str.as_str(),
+                        reason_str,
+                    ])
+                    .context("Failed to write CSV record")?;
             }
         }
         csv_writer.flush().context("Failed to flush CSV writer")?;
+
+    // ── JSON output ────────────────────────────────────────────────────
     } else if args.json {
         let json_output =
             serde_json::to_string_pretty(&reports).context("Failed to serialize report to JSON")?;
         println!("{}", json_output);
+
+    // ── Table output ───────────────────────────────────────────────────
     } else {
-        // The plain text report path is preserved byte-for-byte when
-        // `--check` is not passed: only entries with a measured value are
-        // rendered in the table, and summary text is unchanged.
+        // The plain text report path: only entries with a measured value
+        // are rendered in the table. Failure entries are listed below the
+        // table as explicit failure notes. The summary text reports both
+        // success and failure counts.
         println!("\n=== WORKSPACE BUDGET REPORT ===");
         let table_reports: Vec<TableCostReport> = reports
             .iter()
@@ -974,7 +1057,31 @@ fn main() -> Result<()> {
             .collect();
         let table = Table::new(table_reports).to_string();
         println!("{}", table);
-        println!("\nSummary: The values above are simulated resource amounts, not fees. They are three of the inputs to the non-refundable resource fee.");
+
+        // Print failure notes below the table
+        let failure_entries: Vec<&CostReport> = reports
+            .iter()
+            .filter(|report| report.status == "failed")
+            .collect();
+        if !failure_entries.is_empty() {
+            println!("\n--- FAILED SIMULATIONS ---");
+            for entry in &failure_entries {
+                let reason = entry
+                    .failure_reason
+                    .as_deref()
+                    .unwrap_or("unknown error");
+                println!(
+                    "  {}::{} — simulation failed: {}",
+                    entry.package, entry.function, reason
+                );
+            }
+        }
+
+        println!(
+            "\nSummary: {} function(s) simulated successfully, {} failed",
+            simulated_count, failed_count
+        );
+        println!("The values above are simulated resource amounts, not fees. They are three of the inputs to the non-refundable resource fee.");
         println!("* Not measured: transaction size, ledger footprint entry counts, refundable fees (rent, events, return value), the inclusion fee, and therefore the total fee charged.");
         println!("* Note: These are simulated numbers on testnet and may vary slightly depending on ledger state.");
         println!("* See the \"Measurement scope\" section of the Tool Reference for what to use instead when you need those figures.");
@@ -1002,9 +1109,24 @@ fn main() -> Result<()> {
                         format_with_commas_and_units(u64::from(display_value), report.metric)
                     })
                     .unwrap_or_else(|| "-".to_string());
+                let reason_suffix = if report.status == "failed" {
+                    if let Some(reason) = &report.failure_reason {
+                        format!(" reason=\"{}\"", reason)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
                 println!(
-                    "{}::{} [{}] value={} limit={} {}",
-                    report.package, report.function, report.metric, value_str, limit_str, status
+                    "{}::{} [{}] value={} limit={} {}{}",
+                    report.package,
+                    report.function,
+                    report.metric,
+                    value_str,
+                    limit_str,
+                    status,
+                    reason_suffix
                 );
                 if pass {
                     passed += 1;
@@ -1502,18 +1624,33 @@ write_limit = 1000
         let mut csv_writer = csv::Writer::from_writer(vec![]);
         if check {
             csv_writer
-                .write_record(["package", "function", "metric", "value", "limit", "pass"])
+                .write_record([
+                    "status",
+                    "package",
+                    "function",
+                    "metric",
+                    "value",
+                    "failure_reason",
+                    "limit",
+                    "pass",
+                ])
                 .unwrap();
             for report in reports {
                 let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();
+                let reason_str = report
+                    .failure_reason
+                    .as_deref()
+                    .unwrap_or_default();
                 let limit_str = report.limit.map(|lim| lim.to_string()).unwrap_or_default();
                 let pass_str = report.pass.map(|p| p.to_string()).unwrap_or_default();
                 csv_writer
                     .write_record([
+                        report.status,
                         report.package.as_str(),
                         report.function.as_str(),
                         report.metric,
                         value_str.as_str(),
+                        reason_str,
                         limit_str.as_str(),
                         pass_str.as_str(),
                     ])
@@ -1521,17 +1658,33 @@ write_limit = 1000
             }
         } else {
             csv_writer
-                .write_record(["package", "function", "metric", "value"])
+                .write_record([
+                    "status",
+                    "package",
+                    "function",
+                    "metric",
+                    "value",
+                    "failure_reason",
+                ])
                 .unwrap();
             for report in reports {
-                if report.value.is_some() {
+                // In non-check mode, only include entries with a measured
+                // value (successful simulations) or failure entries.
+                // Entries with neither (stale check-only stubs) are excluded.
+                if report.value.is_some() || report.status == "failed" {
                     let value_str = report.value.map(|val| val.to_string()).unwrap_or_default();
+                    let reason_str = report
+                        .failure_reason
+                        .as_deref()
+                        .unwrap_or_default();
                     csv_writer
                         .write_record([
+                            report.status,
                             report.package.as_str(),
                             report.function.as_str(),
                             report.metric,
                             value_str.as_str(),
+                            reason_str,
                         ])
                         .unwrap();
                 }
@@ -1542,59 +1695,87 @@ write_limit = 1000
     }
 
     #[test]
-    fn csv_output_without_check_has_four_columns() {
+    fn csv_output_without_check_has_six_columns_including_status_and_failure_reason() {
         let reports = vec![
             CostReport {
+                status: "success",
                 package: "my-contract".to_string(),
                 function: "do_work".to_string(),
                 metric: "CPU Instructions",
                 value: Some(1_000_000),
+                failure_reason: None,
                 limit: None,
                 pass: None,
             },
             CostReport {
+                status: "success",
                 package: "my-contract".to_string(),
                 function: "do_work".to_string(),
                 metric: "Read Bytes",
                 value: Some(2_048),
+                failure_reason: None,
                 limit: None,
                 pass: None,
             },
         ];
         let csv = reports_to_csv(&reports, false);
         let expected = concat!(
-            "package,function,metric,value\n",
-            "my-contract,do_work,CPU Instructions,1000000\n",
-            "my-contract,do_work,Read Bytes,2048\n",
+            "status,package,function,metric,value,failure_reason\n",
+            "success,my-contract,do_work,CPU Instructions,1000000,\n",
+            "success,my-contract,do_work,Read Bytes,2048,\n",
         );
         assert_eq!(csv, expected);
     }
 
     #[test]
-    fn csv_output_with_check_has_six_columns() {
+    fn csv_output_with_check_has_eight_columns() {
         let reports = vec![
             CostReport {
+                status: "success",
                 package: "my-contract".to_string(),
                 function: "do_work".to_string(),
                 metric: "CPU Instructions",
                 value: Some(1_000_000),
+                failure_reason: None,
                 limit: Some(5_000_000),
                 pass: Some(true),
             },
             CostReport {
+                status: "failed",
                 package: "my-contract".to_string(),
                 function: "do_work".to_string(),
                 metric: "Write Bytes",
-                value: Some(4_096),
+                value: None,
+                failure_reason: Some("invoke failed: not enough gas".to_string()),
                 limit: Some(1_000),
                 pass: Some(false),
             },
         ];
         let csv = reports_to_csv(&reports, true);
         let expected = concat!(
-            "package,function,metric,value,limit,pass\n",
-            "my-contract,do_work,CPU Instructions,1000000,5000000,true\n",
-            "my-contract,do_work,Write Bytes,4096,1000,false\n",
+            "status,package,function,metric,value,failure_reason,limit,pass\n",
+            "success,my-contract,do_work,CPU Instructions,1000000,,5000000,true\n",
+            "failed,my-contract,do_work,Write Bytes,,invoke failed: not enough gas,1000,false\n",
+        );
+        assert_eq!(csv, expected);
+    }
+
+    #[test]
+    fn csv_output_without_check_includes_failure_entries() {
+        let reports = vec![CostReport {
+            status: "failed",
+            package: "my-contract".to_string(),
+            function: "do_work".to_string(),
+            metric: "",
+            value: None,
+            failure_reason: Some("RPC error: timeout".to_string()),
+            limit: None,
+            pass: None,
+        }];
+        let csv = reports_to_csv(&reports, false);
+        let expected = concat!(
+            "status,package,function,metric,value,failure_reason\n",
+            "failed,my-contract,do_work,,,RPC error: timeout\n",
         );
         assert_eq!(csv, expected);
     }
@@ -1603,26 +1784,32 @@ write_limit = 1000
     fn csv_output_without_check_excludes_null_values() {
         let reports = vec![
             CostReport {
+                status: "success",
                 package: "my-contract".to_string(),
                 function: "do_work".to_string(),
                 metric: "CPU Instructions",
                 value: None,
+                failure_reason: None,
                 limit: None,
                 pass: None,
             },
             CostReport {
+                status: "success",
                 package: "my-contract".to_string(),
                 function: "do_work".to_string(),
                 metric: "Read Bytes",
                 value: Some(2_048),
+                failure_reason: None,
                 limit: None,
                 pass: None,
             },
         ];
         let csv = reports_to_csv(&reports, false);
+        // The entry with value=None is excluded (it's not a failure and not a
+        // measurement), while the entry with a value is included.
         let expected = concat!(
-            "package,function,metric,value\n",
-            "my-contract,do_work,Read Bytes,2048\n",
+            "status,package,function,metric,value,failure_reason\n",
+            "success,my-contract,do_work,Read Bytes,2048,\n",
         );
         assert_eq!(csv, expected);
     }
@@ -1630,17 +1817,19 @@ write_limit = 1000
     #[test]
     fn csv_output_with_check_includes_simulation_failures() {
         let reports = vec![CostReport {
+            status: "failed",
             package: "my-contract".to_string(),
             function: "do_work".to_string(),
             metric: "CPU Instructions",
             value: None,
+            failure_reason: Some("invoke failed: out of gas".to_string()),
             limit: Some(5_000_000),
             pass: Some(false),
         }];
         let csv = reports_to_csv(&reports, true);
         let expected = concat!(
-            "package,function,metric,value,limit,pass\n",
-            "my-contract,do_work,CPU Instructions,,5000000,false\n",
+            "status,package,function,metric,value,failure_reason,limit,pass\n",
+            "failed,my-contract,do_work,CPU Instructions,,invoke failed: out of gas,5000000,false\n",
         );
         assert_eq!(csv, expected);
     }
@@ -1649,6 +1838,80 @@ write_limit = 1000
     fn csv_output_empty_reports_produces_header_only() {
         let reports: Vec<CostReport> = vec![];
         let csv = reports_to_csv(&reports, false);
-        assert_eq!(csv, "package,function,metric,value\n");
+        assert_eq!(csv, "status,package,function,metric,value,failure_reason\n");
+    }
+
+    // --- Simulation failure representation tests ---
+
+    #[test]
+    fn simulation_failure_label_is_descriptive() {
+        let invoke_fail = SimulationFailure::Invoke("command not found".to_string());
+        assert_eq!(invoke_fail.label(), "invoke failed");
+        assert_eq!(invoke_fail.detail(), "command not found");
+
+        let rpc_fail = SimulationFailure::Rpc("{\"code\": -32000}".to_string());
+        assert_eq!(rpc_fail.label(), "RPC error");
+        assert_eq!(rpc_fail.detail(), "{\"code\": -32000}");
+
+        let metrics_fail = SimulationFailure::MetricsExtraction("bad XDR".to_string());
+        assert_eq!(metrics_fail.label(), "metrics extraction failed");
+        assert_eq!(metrics_fail.detail(), "bad XDR");
+    }
+
+    #[test]
+    fn cost_report_success_serialization_includes_status() {
+        let report = CostReport {
+            status: "success",
+            package: "pkg".to_string(),
+            function: "fn".to_string(),
+            metric: "CPU Instructions",
+            value: Some(42),
+            failure_reason: None,
+            limit: None,
+            pass: None,
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["status"], "success");
+        assert_eq!(json["value"], 42);
+        assert!(json.get("failure_reason").is_none());
+    }
+
+    #[test]
+    fn cost_report_failure_serialization_includes_status_and_reason() {
+        let report = CostReport {
+            status: "failed",
+            package: "pkg".to_string(),
+            function: "fn".to_string(),
+            metric: "",
+            value: None,
+            failure_reason: Some("invoke failed: boom".to_string()),
+            limit: None,
+            pass: None,
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["status"], "failed");
+        assert!(json.get("value").is_none());
+        assert_eq!(json["failure_reason"], "invoke failed: boom");
+    }
+
+    #[test]
+    fn evaluate_check_within_limit() {
+        let (limit, pass) = evaluate_check(100, Some(200));
+        assert_eq!(limit, Some(200));
+        assert_eq!(pass, Some(true));
+    }
+
+    #[test]
+    fn evaluate_check_exceeds_limit() {
+        let (limit, pass) = evaluate_check(300, Some(200));
+        assert_eq!(limit, Some(200));
+        assert_eq!(pass, Some(false));
+    }
+
+    #[test]
+    fn evaluate_check_no_limit() {
+        let (limit, pass) = evaluate_check(100, None);
+        assert_eq!(limit, None);
+        assert_eq!(pass, None);
     }
 }
