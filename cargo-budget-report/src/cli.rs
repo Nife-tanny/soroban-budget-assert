@@ -142,4 +142,14 @@ pub struct BudgetReportArgs {
     /// `tier-a-limits.provenance.md` for `tier-a-limits.env`).
     #[arg(long, value_name = "PATH")]
     pub provenance_out: Option<String>,
+
+    /// Emit the report as a single self-contained HTML page instead of a
+    /// table, JSON, or CSV.
+    ///
+    /// The page has no external CSS, scripts, or fonts, so it renders
+    /// correctly from a `file://` URL and from a downloaded CI artifact.
+    /// Each row shows the same values as `--json` for the same run; in
+    /// `--check` mode rows also show their limit and pass/fail status.
+    #[arg(long, default_value_t = false)]
+    pub html: bool,
 }

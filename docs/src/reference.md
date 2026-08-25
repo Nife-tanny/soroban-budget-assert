@@ -278,6 +278,7 @@ cargo budget-report [--network <network>] [--source <source>] [--json] [--check]
 | `--network` | yes (flag or `budget.toml`) | Network to deploy and simulate against, e.g. `testnet` |
 | `--source` | yes (flag or `budget.toml`) | Funded identity used for deploy fees and as the simulation source |
 | `--json` | no | Emit the report as pretty-printed JSON instead of a table |
+| `--html` | no | Emit the report as a single self-contained HTML page — no external CSS, scripts, or fonts, so it renders from a `file://` URL and from a downloaded CI artifact. Rows mirror the JSON output; with `--check` each row also shows its limit and pass/fail status |
 | `--check` | no | Compare measured metrics against `cpu_limit` / `read_limit` / `write_limit` declared per function in `budget.toml`; print a per-function+metric pass/fail line and exit non-zero on any breach or failed configured simulation |
 
 Configuration precedence: a CLI flag overrides the `budget.toml` value. If neither provides `network`/`source`, the command exits with an error naming the missing field.
@@ -440,6 +441,22 @@ what is not measured, and that testnet simulations vary slightly with ledger sta
 ```
 
 When `--check --json` is used, configured functions gain `limit` and `pass` (see [the `--check` section above](#check-enforcing-regression-limits-against-network-verified-costs)); the shape for unconfigured functions is unchanged.
+
+### HTML output (`--html`)
+
+`--html` emits the same data as `--json` as a single self-contained HTML file:
+
+- One row per measured metric with the same names and numbers as the JSON output for the same run.
+- Values are displayed with thousands separators; the raw number is kept in a `data-value` attribute on each cell so it can still be copied or scripted over.
+- In `--check` mode each row gains a `Limit` column and a `Status` column. Pass/fail is conveyed with `✓ PASS` / `✗ FAIL` text and a glyph, so it is readable without relying on colour.
+- Package and function names (which come from the workspace) are HTML-escaped before being placed in the page.
+- A run with zero successful measurements produces a valid page with an explicit empty state rather than an empty file.
+
+There are no external CSS files, scripts, or fonts — the page works from a `file://` URL and from a downloaded CI artifact. To share a report with someone who does not run `cargo`, pipe it to a file:
+
+```bash
+cargo budget-report --html > budget-report.html
+```
 
 ## Measurement scope
 

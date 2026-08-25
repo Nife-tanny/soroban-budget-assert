@@ -4,7 +4,13 @@ use crate::module_10::{Error, Result, SimulationFailure, SimulationOutcome};
 use anyhow::Context;
 mod cli;
 mod compare;
-use cargo_metadata::MetadataCommand;
+mod fixture;
+mod html_output;
+mod live;
+mod record;
+mod replay;
+mod transport;
+use cargo_metadata::{CrateType, MetadataCommand};
 use clap::Parser;
 use compare::{
     build_baseline, check_against_baseline, max_allowed as max_allowed_metric, parse_tolerance,
@@ -13,9 +19,8 @@ use compare::{
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 use stellar_xdr::curr::{Limits, ReadXdr, SorobanTransactionData};
@@ -455,56 +460,15 @@ fn build_rpc_payload(b64_xdr: &str) -> serde_json::Value {
     })
 }
 
-/// POSTs a `simulateTransaction` JSON-RPC request for `b64_xdr` and returns
-/// the parsed response body.
+/// Simulates one exported function end-to-end through a
+/// [`transport::Transport`]: builds the invocation transaction, POSTs it to
+/// `simulateTransaction` and decodes the reported resource usage.
 ///
-/// Uses `curl` to send the request to the Soroban RPC endpoint. The
-/// request body is piped via stdin to avoid shell-quoting issues.
-///
-/// # Errors
-///
-/// Returns an error if `curl` cannot be spawned, the request fails, or
-/// the response body is not valid JSON.
-fn simulate_transaction_rpc(b64_xdr: &str) -> Result<serde_json::Value> {
-    let rpc_payload = build_rpc_payload(b64_xdr);
-
-    let mut curl = Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            "@-",
-            "https://soroban-testnet.stellar.org:443",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::CommandFailed(format!("failed to execute curl: {}", e)))?;
-
-    {
-        let stdin = curl
-            .stdin
-            .as_mut()
-            .ok_or_else(|| Error::CommandFailed("Failed to open stdin".into()))?;
-        stdin
-            .write_all(rpc_payload.to_string().as_bytes())
-            .map_err(|e| Error::CommandFailed(format!("failed to write to stdin: {}", e)))?;
-    }
-
-    let curl_output = curl
-        .wait_with_output()
-        .map_err(|e| Error::CommandFailed(format!("failed to read curl output: {}", e)))?;
-    serde_json::from_slice(&curl_output.stdout)
-        .map_err(|e| Error::Message(format!("Failed to parse RPC response: {}", e)))
-}
-
-/// Simulates one exported function end-to-end: runs
-/// `stellar contract invoke --build-only` to build the transaction, then
-/// POSTs it to `simulateTransaction` and decodes the reported resource
-/// usage.
+/// `LiveTransport` shells out to `stellar contract invoke --build-only` and
+/// `curl`, keeping the network-facing behaviour of earlier versions
+/// unchanged; `ReplayTransport` serves the same calls from a recorded
+/// fixture, which is how the rest of the crate can be tested without a
+/// network.
 ///
 /// Returns `Err` only for a spawn/IO failure on the `stellar`/`curl` child
 /// processes — the tool cannot proceed without those binaries. A
@@ -513,29 +477,38 @@ fn simulate_transaction_rpc(b64_xdr: &str) -> Result<serde_json::Value> {
 /// `Ok(SimulationOutcome::Failed(..))` so the caller can move on to the next
 /// function instead of aborting the whole report.
 fn simulate_function(
+    transport: &mut impl transport::Transport,
     contract_id: &str,
     source: &str,
     network: &str,
     function: &str,
     func_args: &[String],
+    package: &str,
 ) -> Result<SimulationOutcome> {
-    let invoke_args = build_invoke_args(contract_id, source, network, function, func_args);
-    let invoke_output = Command::new("stellar")
-        .args(&invoke_args)
-        .output()
-        .map_err(|e| {
-            Error::CommandFailed(format!("failed to execute stellar-cli invoke: {}", e))
-        })?;
+    // Build the invocation XDR through the transport. The live transport
+    // reports a failed `stellar contract invoke` as an error; that is a
+    // recoverable per-function failure (the CLI ran, the invocation
+    // failed), so it is recorded as `Failed(Invoke(..))` rather than
+    // aborting the whole report.
+    let b64_xdr = match transport.build_invoke_xdr(
+        contract_id,
+        source,
+        network,
+        function,
+        func_args,
+        package,
+    ) {
+        Ok(xdr) => xdr,
+        Err(err) => {
+            return Ok(SimulationOutcome::Failed(SimulationFailure::Invoke(
+                format!("{:#}", err),
+            )));
+        }
+    };
 
-    if !invoke_output.status.success() {
-        let stderr = String::from_utf8_lossy(&invoke_output.stderr).to_string();
-        return Ok(SimulationOutcome::Failed(SimulationFailure::Invoke(stderr)));
-    }
-
-    let b64_xdr = String::from_utf8_lossy(&invoke_output.stdout)
-        .trim()
-        .to_string();
-    let rpc_resp = simulate_transaction_rpc(&b64_xdr)?;
+    let rpc_resp = transport
+        .simulate_transaction(&b64_xdr, package, function)
+        .map_err(|e| Error::CommandFailed(format!("{:#}", e)))?;
 
     if let Some(error) = rpc_resp.get("error") {
         return Ok(SimulationOutcome::Failed(SimulationFailure::Rpc(
@@ -802,15 +775,16 @@ fn run_preflight_checks(quiet: bool) -> Result<()> {
     Ok(())
 }
 
-/// Deploys a contract WASM to the network with automatic retry on
-/// friendbot-related transient failures.
+/// Deploys a contract WASM to the network through a [`transport::Transport`]
+/// with automatic retry on friendbot-related transient failures.
 ///
-/// The `stellar contract deploy` command implicitly triggers friendbot
-/// funding for the source account on testnet. Friendbot may return 429
-/// (rate-limited) or the account may not be confirmed on-ledger yet.
-/// This function makes up to `MAX_DEPLOY_ATTEMPTS` total attempts with
-/// exponential backoff before giving up.
+/// The live transport runs `stellar contract deploy`, which implicitly
+/// triggers friendbot funding for the source account on testnet. Friendbot
+/// may return 429 (rate-limited) or the account may not be confirmed
+/// on-ledger yet. This function makes up to `MAX_DEPLOY_ATTEMPTS` total
+/// attempts with exponential backoff before giving up.
 fn deploy_contract_with_retry(
+    transport: &mut impl transport::Transport,
     wasm_path: &Path,
     source: &str,
     network: &str,
@@ -828,32 +802,10 @@ fn deploy_contract_with_retry(
             thread::sleep(Duration::from_secs(delay));
         }
 
-        let deploy_output = Command::new("stellar")
-            .args([
-                "contract",
-                "deploy",
-                "--wasm",
-                wasm_path
-                    .to_str()
-                    .ok_or_else(|| Error::Message("wasm path is not valid UTF-8".into()))?,
-                "--source",
-                source,
-                "--network",
-                network,
-            ])
-            .output()
-            .map_err(|e| {
-                Error::CommandFailed(format!("failed to execute stellar-cli deploy: {}", e))
-            })?;
-
-        if deploy_output.status.success() {
-            let contract_id = String::from_utf8_lossy(&deploy_output.stdout)
-                .trim()
-                .to_string();
-            return Ok(contract_id);
+        match transport.deploy_contract(wasm_path, source, network, package_name) {
+            Ok(contract_id) => return Ok(contract_id),
+            Err(err) => last_error = format!("{:#}", err),
         }
-
-        last_error = String::from_utf8_lossy(&deploy_output.stderr).to_string();
     }
 
     Err(Error::Message(format!(
@@ -1123,11 +1075,16 @@ fn main() -> anyhow::Result<()> {
 
     let build_profile = args.profile.as_deref().unwrap_or("release");
 
+    // All network interaction happens through the transport. Production runs
+    // use `LiveTransport`; `ReplayTransport` (fed by `RecordingTransport`)
+    // is available to tests and a follow-up CLI flag.
+    let mut transport = live::LiveTransport;
+
     for package in metadata.packages {
         let is_cdylib = package
             .targets
             .iter()
-            .any(|target| target.crate_types.iter().any(|ct| *ct == "cdylib"));
+            .any(|target| target.crate_types.contains(&CrateType::CDyLib));
         if !is_cdylib {
             continue;
         }
@@ -1139,7 +1096,7 @@ fn main() -> anyhow::Result<()> {
             .args([
                 "build",
                 "-p",
-                &package.name,
+                package.name.as_str(),
                 "--target",
                 "wasm32-unknown-unknown",
                 "--profile",
@@ -1158,7 +1115,7 @@ fn main() -> anyhow::Result<()> {
         let cdylib_target = package
             .targets
             .iter()
-            .find(|t| t.crate_types.iter().any(|ct| *ct == "cdylib"));
+            .find(|t| t.crate_types.contains(&CrateType::CDyLib));
         let wasm_name = match cdylib_target {
             Some(target) => target.name.clone(),
             None => {
@@ -1228,8 +1185,13 @@ fn main() -> anyhow::Result<()> {
             Some(pb)
         };
 
-        let contract_id =
-            deploy_contract_with_retry(wasm_path.as_std_path(), &source, &network, &package.name)?;
+        let contract_id = deploy_contract_with_retry(
+            &mut transport,
+            wasm_path.as_std_path(),
+            &source,
+            &network,
+            &package.name,
+        )?;
 
         if let Some(spinner) = spinner {
             spinner.finish_and_clear();
@@ -1245,7 +1207,15 @@ fn main() -> anyhow::Result<()> {
             let func_config = toml_config.functions.get(&function);
             let func_args = func_config.map(|cfg| cfg.args.clone()).unwrap_or_default();
 
-            match simulate_function(&contract_id, &source, &network, &function, &func_args)? {
+            match simulate_function(
+                &mut transport,
+                &contract_id,
+                &source,
+                &network,
+                &function,
+                &func_args,
+                &package.name,
+            )? {
                 SimulationOutcome::Metrics {
                     instructions,
                     read_bytes,
@@ -1261,7 +1231,7 @@ fn main() -> anyhow::Result<()> {
                         write_bytes: write_bytes as u64,
                     };
                     measurements
-                        .entry(package.name.clone())
+                        .entry(package.name.as_str().to_string())
                         .or_default()
                         .insert(function.clone(), measured);
 
@@ -1364,6 +1334,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     if measurements.is_empty() {
+        // `--html` still produces a valid page so a consumer pointed at the
+        // output sees an explicit empty state rather than an empty file.
+        if args.html {
+            println!("{}", html_output::render_html(&[], args.check));
+        }
         if !args.quiet {
             eprintln!("No successful simulations to report.");
         }
@@ -1478,6 +1453,8 @@ fn main() -> anyhow::Result<()> {
         let json_output =
             serde_json::to_string_pretty(&reports).context("Failed to serialize report to JSON")?;
         println!("{}", json_output);
+    } else if args.html {
+        print!("{}", html_output::render_html(&reports, args.check));
     } else {
         // The plain text report path is preserved byte-for-byte when
         // `--check` is not passed: only entries with a measured value are
@@ -1961,6 +1938,7 @@ mod tests {
             json: false,
             check: false,
             csv: false,
+            html: false,
             record_baseline: None,
             check_baseline: None,
             tolerance: None,
@@ -1988,6 +1966,7 @@ mod tests {
             json: false,
             check: false,
             csv: false,
+            html: false,
             record_baseline: Some("budget-baseline.toml".to_string()),
             check_baseline: None,
             tolerance: None,
@@ -2015,6 +1994,7 @@ mod tests {
             json: false,
             check: false,
             csv: false,
+            html: false,
             record_baseline: None,
             check_baseline: Some("custom.toml".to_string()),
             tolerance: None,
@@ -2045,6 +2025,7 @@ mod tests {
             json: false,
             check: false,
             csv: false,
+            html: false,
             record_baseline: None,
             check_baseline: None,
             tolerance: None,

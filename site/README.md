@@ -14,6 +14,15 @@ The landing page is a lightweight, responsive, single-page website built with st
 - `assets/dashboard.js`: Dashboard data fetching and chart rendering logic.
 - `assets/dashboard.css`: Dashboard-specific styles.
 
+### Dashboard data source
+
+The dashboard fetches `./history.json` (overridable with `?history=URL`). The
+parameter is deliberately left open — the dashboard is meant to be pointed at
+`history.json` files published on other hosts — so the page treats every value
+in the fetched document as untrusted text: nothing is inserted as HTML, and a
+missing, non-JSON, or wrongly-shaped file produces a distinct on-page error
+message rather than a silent blank page.
+
 ## 🛠️ Local Development & Preview
 
 Since the site consists of static files, you can view it directly by opening `index.html` in any web browser, or serve it using any simple static HTTP server:

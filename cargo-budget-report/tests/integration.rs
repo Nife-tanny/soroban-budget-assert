@@ -214,6 +214,81 @@ fn check_flag_fails_when_a_limit_is_exceeded() {
         .stdout(contains("FAIL"));
 }
 
+#[test]
+fn html_output_renders_both_mock_contracts() {
+    let workspace = setup_mock_workspace();
+
+    let assert = budget_report_cmd(workspace.path())
+        .args([
+            "budget-report",
+            "--network",
+            "local",
+            "--source",
+            "alice",
+            "--html",
+        ])
+        .assert();
+
+    let output = assert.success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.starts_with("<!doctype html>"),
+        "expected an HTML document, got: {stdout}"
+    );
+    assert!(stdout.contains("mock-contract-a"), "got: {stdout}");
+    assert!(stdout.contains("mock-contract-b"), "got: {stdout}");
+    assert!(stdout.contains("mock-contract-renamed"), "got: {stdout}");
+    assert!(stdout.contains("CPU Instructions"), "got: {stdout}");
+    // Thousands separators for the values the fake RPC returns.
+    assert!(stdout.contains("1,000,000"), "got: {stdout}");
+    assert!(stdout.contains("2,048"), "got: {stdout}");
+    // The page must be fully self-contained: no linked CSS or external scripts.
+    assert!(
+        !stdout.contains("<link"),
+        "page must not link external CSS: {stdout}"
+    );
+    assert!(
+        !stdout.contains("<script src"),
+        "page must not load external scripts: {stdout}"
+    );
+}
+
+#[test]
+fn html_output_check_mode_shows_pass_and_fail_rows() {
+    let workspace = setup_mock_workspace();
+    fs::write(
+        workspace.path().join("budget.toml"),
+        "[functions.ping]\n\
+         cpu_limit = 10\n\
+         read_limit = 5000\n\
+         write_limit = 5000\n\
+         \n\
+         [functions.pong]\n\
+         cpu_limit = 5000000\n",
+    )
+    .expect("failed to write budget.toml");
+
+    let assert = budget_report_cmd(workspace.path())
+        .args([
+            "budget-report",
+            "--network",
+            "local",
+            "--source",
+            "alice",
+            "--html",
+            "--check",
+        ])
+        .assert();
+
+    // ping's CPU limit (10) is breached, so `--check` exits non-zero.
+    let output = assert.failure().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("&#10007; FAIL"), "got: {stdout}");
+    assert!(stdout.contains("&#10003; PASS"), "got: {stdout}");
+}
+
 // ── Retry mechanism integration tests ───────────────────────────────────
 
 #[test]
