@@ -798,6 +798,44 @@ fn run_preflight_checks(quiet: bool) -> Result<()> {
             }
         }
     }
+    // ── curl ────────────────────────────────────────────────────────────
+    // Used by `simulate_transaction_rpc` for every `simulateTransaction`
+    // call. Unlike rustup, curl is not optional, so its absence is a hard
+    // error rather than a silent skip.
+    if !quiet {
+        eprint!("Checking curl... ");
+    }
+    let curl_check = Command::new("curl").arg("--version").output();
+    match curl_check {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::Message(
+                "curl is not installed or not on PATH.\n\
+                 Install it with your system package manager, e.g.:\n  \
+                 Debian/Ubuntu: sudo apt-get install curl\n  \
+                 macOS:         brew install curl\n\
+                 See: https://curl.se/download.html"
+                    .to_string(),
+            ));
+        }
+        Err(e) => {
+            return Err(Error::CommandFailed(format!(
+                "failed to execute curl --version: {}",
+                e
+            )));
+        }
+        Ok(output) if !output.status.success() => {
+            return Err(Error::CommandFailed(format!(
+                "curl failed to run.\n\
+                 stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(_output) => {
+            if !quiet {
+                eprintln!("found");
+            }
+        }
+    }
 
     Ok(())
 }

@@ -73,6 +73,39 @@ fn budget_report_cmd(dir: &Path) -> Command {
     cmd
 }
 
+/// A `PATH` containing only the fake `stellar` script and a `bash` symlink,
+/// with `curl` (and everything else on the real `PATH`) absent, so
+/// `run_preflight_checks` sees `stellar` but cannot find `curl`.
+///
+/// `bash` must be reachable because the fake `stellar` script's
+/// `#!/usr/bin/env bash` shebang resolves it via `PATH`, not an absolute
+/// path. Symlinking whatever `bash` this machine actually has (rather than
+/// filtering the real `PATH` down to e.g. `/bin`) keeps the test portable:
+/// on some Linux distributions `/bin` is a symlink to `/usr/bin`, which
+/// would pull `curl` back in alongside `bash`.
+fn stellar_only_path_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    fs::copy(fake_bin_dir().join("stellar"), dir.path().join("stellar"))
+        .expect("failed to copy fake stellar script");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(dir.path().join("stellar"), perms)
+            .expect("failed to set fake stellar script permissions");
+
+        let real_bash = ["/bin/bash", "/usr/bin/bash"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|p| p.exists())
+            .expect("no bash found at /bin/bash or /usr/bin/bash");
+        symlink(&real_bash, dir.path().join("bash")).expect("failed to symlink bash");
+    }
+
+    dir
+}
+
 #[test]
 fn discovers_mock_workspace_and_reports_cleanly() {
     let workspace = setup_mock_workspace();
@@ -212,6 +245,33 @@ fn check_flag_fails_when_a_limit_is_exceeded() {
         .failure()
         .stdout(contains("mock-contract-a::ping [CPU Instructions]"))
         .stdout(contains("FAIL"));
+}
+
+// ── Preflight check integration tests ───────────────────────────────────
+
+#[test]
+fn preflight_fails_fast_when_curl_is_missing() {
+    let workspace = setup_mock_workspace();
+    let stellar_only = stellar_only_path_dir();
+
+    let mut cmd = Command::cargo_bin("cargo-budget-report").expect("binary should be built");
+    cmd.current_dir(workspace.path())
+        .env("PATH", stellar_only.path())
+        .args(["budget-report", "--network", "local", "--source", "alice"]);
+
+    let assert = cmd.assert();
+    let output = assert.failure().get_output().clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("curl is not installed"),
+        "stderr should report missing curl, got: {stderr:?}"
+    );
+    // Preflight must fail before any build is attempted.
+    assert!(
+        !stderr.contains("Building package"),
+        "curl check should run before build, got: {stderr:?}"
+    );
 }
 
 // ── Retry mechanism integration tests ───────────────────────────────────

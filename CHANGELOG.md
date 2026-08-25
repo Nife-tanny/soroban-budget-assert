@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tier A reconciliation comments in `amm-pool-contract/tests/budget_test.rs` are now auto-generated from `tier-a-limits.provenance.md`, not transcribed by hand. Re-derive the artifact instead of editing the test inline when a limit needs to change.
 - `src/lib.rs` re-exports `module_25` alongside the existing `module_1`.
 
+### Fixed
+
+- `run_preflight_checks` now checks that `curl` is on `PATH` before building or deploying anything, reporting its absence in the same style as the existing `stellar` CLI and wasm target checks. Previously, a machine with `stellar` and the wasm target but no `curl` would build every workspace package and deploy each contract to the network before failing on the first `simulateTransaction` call, with an error (`failed to execute curl: No such file or directory (os error 2)`) that read like a missing input file rather than a missing program. `--derive-limits` is unaffected, since it does not reach `run_preflight_checks`.
+
 ### Notes
 
 - The per-metric split (cpu / memory / read / write), not per-operation-type, is the grain of this change. **Issue #45** (per-operation-type margin) would slot in alongside `[scenarios]` as `keys: HashMap<FunctionKey, Margin>` in `DerivationConfig`; no macro change required.
