@@ -628,150 +628,15 @@ fn build_rpc_payload(b64_xdr: &str) -> serde_json::Value {
     })
 }
 
-/// POSTs a `simulateTransaction` JSON-RPC request for `b64_xdr` and returns
-/// the parsed response body, classified as [`RetryFailure`] so the retry
-/// wrapper can decide whether to attempt again.
+/// Simulates one exported function end-to-end through a
+/// [`transport::Transport`]: builds the invocation transaction, POSTs it to
+/// `simulateTransaction` and decodes the reported resource usage.
 ///
-/// Uses `curl` to send the request to the Soroban RPC endpoint. The
-/// request body is piped via stdin to avoid shell-quoting issues.
-///
-/// # Errors
-///
-/// Returns a *permanent* [`RetryFailure`] if `curl` cannot be spawned or
-/// its stdio cannot be wired up (environment problems retrying cannot
-/// fix), and a *transient* one for connection-level failures (non-zero
-/// curl exit) or an unparseable response body.
-fn simulate_transaction_rpc(b64_xdr: &str) -> std::result::Result<serde_json::Value, RetryFailure> {
-    let rpc_payload = build_rpc_payload(b64_xdr);
-
-    let mut curl = Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            "@-",
-            "https://soroban-testnet.stellar.org:443",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            // A missing/unspawnable `curl` is an environment problem,
-            // not something a retry can fix.
-            RetryFailure::Permanent(format!("failed to execute curl: {}", e))
-        })?;
-
-    {
-        let stdin = curl
-            .stdin
-            .as_mut()
-            .ok_or_else(|| RetryFailure::Permanent("Failed to open stdin".to_string()))?;
-        stdin
-            .write_all(rpc_payload.to_string().as_bytes())
-            .map_err(|e| RetryFailure::Permanent(format!("failed to write to stdin: {}", e)))?;
-    }
-
-    let curl_output = curl
-        .wait_with_output()
-        .map_err(|e| RetryFailure::Permanent(format!("failed to read curl output: {}", e)))?;
-
-    if !curl_output.status.success() {
-        // Connection refused, DNS failure, TLS errors, HTTP-level
-        // failures surfaced by `curl -s`: all plausibly transient.
-        return Err(RetryFailure::Transient(format!(
-            "curl exited with status {}: {}",
-            curl_output.status,
-            String::from_utf8_lossy(&curl_output.stderr).trim()
-        )));
-    }
-
-    serde_json::from_slice(&curl_output.stdout).map_err(|e| {
-        // An empty or truncated body almost always means the
-        // connection dropped mid-response; treat it as transient.
-        RetryFailure::Transient(format!("Failed to parse RPC response: {}", e))
-    })
-}
-
-/// POSTs the `simulateTransaction` request with retry on plausibly
-/// transient failures (connection errors, rate limits). Deterministic
-/// failures such as an unspawnable `curl` are not retried.
-///
-/// Exhausting every attempt remains fatal (the run aborts), matching the
-/// pre-retry behavior where an RPC transport failure failed the whole run.
-fn simulate_transaction_rpc_with_retry(
-    b64_xdr: &str,
-    retry_config: &RetryConfig,
-    quiet: bool,
-) -> Result<serde_json::Value> {
-    run_with_retry(
-        retry_config,
-        quiet,
-        "Simulate RPC request",
-        || simulate_transaction_rpc(b64_xdr),
-        |last_error| {
-            Error::Message(format!(
-                "Simulate RPC request failed after {} attempts.\nLast error: {}",
-                retry_config.max_attempts, last_error
-            ))
-        },
-    )
-}
-
-/// Builds the unsigned transaction XDR for one function via
-/// `stellar contract invoke --build-only`, retrying on plausibly
-/// transient failures.
-///
-/// Non-zero exits whose stderr looks transient (rate limits, connection
-/// errors) are retried; deterministic failures — a missing contract ID,
-/// a rejected argument, a spawn failure of the `stellar` binary — are
-/// not, because repeating them cannot change the outcome. Exhaustion is
-/// reported as an error carrying the final stderr so callers can keep
-/// their existing recoverable-failure handling.
-fn build_invoke_xdr_with_retry(
-    invoke_args: &[String],
-    retry_config: &RetryConfig,
-    quiet: bool,
-) -> Result<String> {
-    run_with_retry(
-        retry_config,
-        quiet,
-        "Invoke build",
-        || {
-            let invoke_output =
-                Command::new("stellar")
-                    .args(invoke_args)
-                    .output()
-                    .map_err(|e| {
-                        RetryFailure::Permanent(format!(
-                            "failed to execute stellar-cli invoke: {}",
-                            e
-                        ))
-                    })?;
-
-            if !invoke_output.status.success() {
-                let stderr = String::from_utf8_lossy(&invoke_output.stderr).to_string();
-                return if is_transient_error(&stderr) {
-                    Err(RetryFailure::Transient(stderr))
-                } else {
-                    Err(RetryFailure::Permanent(stderr))
-                };
-            }
-
-            Ok(String::from_utf8_lossy(&invoke_output.stdout)
-                .trim()
-                .to_string())
-        },
-        |last_error| Error::Message(last_error.to_string()),
-    )
-}
-
-/// Simulates one exported function end-to-end: runs
-/// `stellar contract invoke --build-only` to build the transaction (with
-/// retry), then POSTs it to `simulateTransaction` (with retry) and decodes
-/// the reported resource usage.
+/// `LiveTransport` shells out to `stellar contract invoke --build-only` and
+/// `curl`, retrying plausibly transient failures (rate limits, connection
+/// errors) with the crate-wide retry configuration; `ReplayTransport`
+/// serves the same calls from a recorded fixture, which is how the rest of
+/// the crate can be tested without a network.
 ///
 /// Returns `Err` only for a persistent RPC transport failure after every
 /// retry attempt is exhausted, or for an unrecoverable environment
@@ -780,7 +645,6 @@ fn build_invoke_xdr_with_retry(
 /// field, or an undecodable response) is reported as
 /// `Ok(SimulationOutcome::Failed(..))` so the caller can move on to the next
 /// function instead of aborting the whole report.
-#[allow(clippy::too_many_arguments)]
 fn simulate_function(
     transport: &mut impl transport::Transport,
     contract_id: &str,
@@ -788,11 +652,21 @@ fn simulate_function(
     network: &str,
     function: &str,
     func_args: &[String],
-    retry_config: &RetryConfig,
-    quiet: bool,
+    package: &str,
 ) -> Result<SimulationOutcome> {
-    let invoke_args = build_invoke_args(contract_id, source, network, function, func_args);
-    let b64_xdr = match build_invoke_xdr_with_retry(&invoke_args, retry_config, quiet) {
+    // Build the invocation XDR through the transport. The live transport
+    // reports a failed `stellar contract invoke` as an error (after any
+    // transient retries); that is a recoverable per-function failure (the
+    // CLI ran, the invocation failed), so it is recorded as
+    // `Failed(Invoke(..))` rather than aborting the whole report.
+    let b64_xdr = match transport.build_invoke_xdr(
+        contract_id,
+        source,
+        network,
+        function,
+        func_args,
+        package,
+    ) {
         Ok(xdr) => xdr,
         Err(err) => {
             return Ok(SimulationOutcome::Failed(SimulationFailure::Invoke(
@@ -800,7 +674,10 @@ fn simulate_function(
             )));
         }
     };
-    let rpc_resp = simulate_transaction_rpc_with_retry(&b64_xdr, retry_config, quiet)?;
+
+    let rpc_resp = transport
+        .simulate_transaction(&b64_xdr, package, function)
+        .map_err(|e| Error::CommandFailed(format!("{:#}", e)))?;
 
     if let Some(error) = rpc_resp.get("error") {
         return Ok(SimulationOutcome::Failed(SimulationFailure::Rpc(
@@ -1068,15 +945,15 @@ fn run_preflight_checks(quiet: bool) -> Result<()> {
 }
 
 /// Deploys a contract WASM to the network through a [`transport::Transport`]
-/// with automatic retry on friendbot-related transient failures.
+/// and turns a failed deploy into the canonical user-facing error.
 ///
-/// The `stellar contract deploy` command implicitly triggers friendbot
-/// funding for the source account on testnet. Friendbot may return 429
-/// (rate-limited) or the account may not be confirmed on-ledger yet.
-/// This function makes up to `retry_config.max_attempts` total attempts
-/// with exponential backoff before giving up — but only when the deploy
-/// stderr looks plausibly transient (rate limits, connection errors).
-/// Deterministic failures are not retried.
+/// Retrying is the live transport's job: [`live::LiveTransport`] wraps the
+/// `stellar contract deploy` call in the crate-wide retry machinery, which
+/// retries friendbot rate limits and other plausibly transient stderr (429,
+/// connection errors) up to `retry_config.max_attempts` times with
+/// exponential backoff and skips retrying deterministic failures. All this
+/// function does is report the outcome with the familiar "source account is
+/// funded" hint.
 fn deploy_contract_with_retry(
     transport: &mut impl transport::Transport,
     wasm_path: &Path,
@@ -1084,57 +961,14 @@ fn deploy_contract_with_retry(
     network: &str,
     package_name: &str,
     retry_config: &RetryConfig,
-    quiet: bool,
 ) -> Result<String> {
-    let wasm_path_str = wasm_path
-        .to_str()
-        .ok_or_else(|| Error::Message("wasm path is not valid UTF-8".into()))?
-        .to_string();
-
-    run_with_retry(
-        retry_config,
-        quiet,
-        "Deploy",
-        || {
-            let deploy_output = Command::new("stellar")
-                .args([
-                    "contract",
-                    "deploy",
-                    "--wasm",
-                    &wasm_path_str,
-                    "--source",
-                    source,
-                    "--network",
-                    network,
-                ])
-                .output()
-                .map_err(|e| {
-                    // A missing/unspawnable `stellar` binary is an
-                    // environment problem, not something a retry fixes.
-                    RetryFailure::Permanent(format!("failed to execute stellar-cli deploy: {}", e))
-                })?;
-
-            if deploy_output.status.success() {
-                let contract_id = String::from_utf8_lossy(&deploy_output.stdout)
-                    .trim()
-                    .to_string();
-                return Ok(contract_id);
-            }
-
-            let stderr = String::from_utf8_lossy(&deploy_output.stderr).to_string();
-            if is_transient_error(&stderr) {
-                Err(RetryFailure::Transient(stderr))
-            } else {
-                Err(RetryFailure::Permanent(stderr))
-            }
-        },
-        |last_error| {
-            Error::Message(format!(
-                "Failed to deploy {} after {} attempts. Ensure your source account is funded.\nLast error: {}",
-                package_name, retry_config.max_attempts, last_error
-            ))
-        },
-    )
+    match transport.deploy_contract(wasm_path, source, network, package_name) {
+        Ok(contract_id) => Ok(contract_id),
+        Err(err) => Err(Error::Message(format!(
+            "Failed to deploy {} after {} attempts. Ensure your source account is funded.\nLast error: {}",
+            package_name, retry_config.max_attempts, err
+        ))),
+    }
 }
 
 fn run_derive_mode(args: &BudgetReportArgs, toml_config: &BudgetToml) -> Result<()> {
@@ -1409,9 +1243,10 @@ fn main() -> anyhow::Result<()> {
     let build_profile = args.profile.as_deref().unwrap_or("release");
 
     // All network interaction happens through the transport. Production runs
-    // use `LiveTransport`; `ReplayTransport` (fed by `RecordingTransport`)
-    // is available to tests and a follow-up CLI flag.
-    let mut transport = live::LiveTransport;
+    // use `LiveTransport` (which owns the retry policy); `ReplayTransport`
+    // (fed by `RecordingTransport`) is available to tests and a follow-up
+    // CLI flag.
+    let mut transport = live::LiveTransport::new(retry_config, args.quiet);
 
     for package in metadata.packages {
         let is_cdylib = package
@@ -1519,12 +1354,12 @@ fn main() -> anyhow::Result<()> {
         };
 
         let contract_id = deploy_contract_with_retry(
+            &mut transport,
             wasm_path.as_std_path(),
             &source,
             &network,
             &package.name,
             &retry_config,
-            args.quiet,
         )?;
 
         if let Some(spinner) = spinner {
@@ -1542,13 +1377,13 @@ fn main() -> anyhow::Result<()> {
             let func_args = func_config.map(|cfg| cfg.args.clone()).unwrap_or_default();
 
             match simulate_function(
+                &mut transport,
                 &contract_id,
                 &source,
                 &network,
                 &function,
                 &func_args,
-                &retry_config,
-                args.quiet,
+                &package.name,
             )? {
                 SimulationOutcome::Metrics {
                     instructions,
