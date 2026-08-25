@@ -331,4 +331,4 @@ Friendbot-funded accounts are reset periodically. If the workflow has been idle 
 - [Protocol Mechanics](mechanics.md) — why local estimates differ from network costs.
 - [Tool Reference](reference.md) — every CLI flag and macro signature.
 - [Developer Guide](developer_guide.md) — building and extending the tool itself.
-- [MEASUREMENTS.md](../../MEASUREMENTS.md) — the measured gap between local and network costs.
+- [Measurements](measurements.md) — the measured gap between local and network costs.

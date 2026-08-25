@@ -355,6 +355,9 @@ impl Derivation {
                         None => missing.push(component.clone()),
                     }
                 }
+                if missing.len() == components.len() {
+                    continue;
+                }
                 if !missing.is_empty() {
                     return Err(Error::Message(format!(
                         "scenario {scenario_full_key} includes component(s) {missing:?} \

@@ -159,7 +159,7 @@ The macro checks a *local* estimate. On this repo's example contract, the WASM l
 - A regression that pushes the local estimate past the limit fails CI — good.
 - A regression that pushes the *network* cost up without moving the local estimate by enough to clear the limit passes Tier A. The network-tracked snapshot in Tier B is the second line of defense.
 
-For the build-profile numbers behind the gap, see [MEASUREMENTS.md](../../MEASUREMENTS.md).
+For the build-profile numbers behind the gap, see [Measurements](measurements.md).
 
 ## Tier B — network-verified measurement in CI
 
@@ -295,4 +295,4 @@ The current workflow uploads the report as a downloadable artifact. A more disco
 - [Protocol Mechanics](mechanics.md) — why Tier A's local estimate can drift, how Tier B's pipeline is built.
 - [Tool Reference](reference.md) — every flag and macro signature.
 - [Cost Terms Glossary](glossary.md) — mapping from `cargo budget-report` rows to XDR fields.
-- [MEASUREMENTS.md](../../MEASUREMENTS.md) — the gap between local and network cost, kept up to date.
+- [Measurements](measurements.md) — the gap between local and network cost, kept up to date.
