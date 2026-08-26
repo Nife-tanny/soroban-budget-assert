@@ -29,7 +29,7 @@ enum BudgetLimit {
     },
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct BudgetSpec {
     cpu: Option<BudgetLimit>,
     mem: Option<BudgetLimit>,
@@ -43,6 +43,7 @@ struct BudgetSpec {
 ///
 /// `budget_lt` takes its baselines as the separate `cpu_baseline` /
 /// `mem_baseline` keys instead, because it carries two metrics at once.
+#[derive(Clone)]
 struct StandaloneSpec {
     limit: BudgetLimit,
     baseline: Option<Expr>,
@@ -440,6 +441,114 @@ fn generate_limit_expr(limit: &BudgetLimit, metric_label: &str) -> proc_macro2::
     }
 }
 
+/// Attribute paths that carry their own budget assertion. A method inside a
+/// budget-annotated `impl` block that already wears one of these is left for
+/// that attribute to expand — the block-level attribute skips it.
+const BUDGET_ATTR_NAMES: &[&str] = &[
+    "budget_cpu_lt",
+    "budget_mem_lt",
+    "budget_write_bytes_lt",
+    "budget_read_bytes_lt",
+    "budget_lt",
+    "budget_scaling",
+];
+
+fn is_budget_attr(attr: &Attribute) -> bool {
+    attr.path()
+        .segments
+        .last()
+        .map(|s| BUDGET_ATTR_NAMES.contains(&s.ident.to_string().as_str()))
+        .unwrap_or(false)
+}
+
+/// Builds the `(plain, marginal)` assertion-failure format strings for one
+/// metric.
+///
+/// `fn_label` is empty for a bare `#[test] fn`, keeping the message
+/// byte-identical to before. On a method reached through a budget-annotated
+/// `impl` block it is the method name, inserted as `` [fn `name`] `` so a
+/// failing block names the specific offender.
+fn assert_messages(metric_phrase: &str, tail: &str, fn_label: &str) -> (String, String) {
+    let ctx = if fn_label.is_empty() {
+        String::new()
+    } else {
+        format!(" [fn `{fn_label}`]")
+    };
+    (
+        format!("{metric_phrase} {{}} exceeded limit {{}}{ctx} - {tail}"),
+        format!(
+            "{metric_phrase} {{}} exceeded limit {{}}{ctx} \
+             (marginal: {{}} measured - {{}} baseline) - {tail}"
+        ),
+    )
+}
+
+/// Applies a per-function budget expansion to either a bare `fn` or every
+/// method of an `impl` block.
+///
+/// - Bare `fn`: `expand(input_fn, "")` — unchanged behaviour.
+/// - `impl` block: every `fn` in the block that does not already carry its own
+///   `#[budget_*]` attribute is instrumented (`expand(method_as_fn, name)`);
+///   a method with its own budget attribute is left for that attribute to
+///   expand, so a per-method limit overrides the block-level one. Helper and
+///   non-`pub` methods are instrumented too — "every function in it" is taken
+///   literally; exclude one with its own no-op attribute if that is not wanted.
+/// - Anything else: the original `fn`-parse error, so `#[budget_*] struct …`
+///   still fails with "expected `fn`".
+fn expand_targets(item: TokenStream, expand: impl Fn(ItemFn, &str) -> TokenStream) -> TokenStream {
+    let tokens: proc_macro2::TokenStream = item.clone().into();
+
+    let fn_err = match syn::parse::<ItemFn>(item) {
+        Ok(input_fn) => return expand(input_fn, ""),
+        Err(e) => e,
+    };
+
+    let mut item_impl = match syn::parse2::<syn::ItemImpl>(tokens) {
+        Ok(block) => block,
+        Err(_) => return TokenStream::from(fn_err.to_compile_error()),
+    };
+
+    let mut instrumented = 0usize;
+    for impl_item in &mut item_impl.items {
+        let syn::ImplItem::Fn(method) = impl_item else {
+            continue;
+        };
+        if method.attrs.iter().any(is_budget_attr) {
+            continue;
+        }
+
+        let as_fn = ItemFn {
+            attrs: method.attrs.clone(),
+            vis: method.vis.clone(),
+            modifiers: method.modifiers.clone(),
+            sig: method.sig.clone(),
+            block: Box::new(method.block.clone()),
+        };
+        let label = method.sig.ident.to_string();
+        let expanded: proc_macro2::TokenStream = expand(as_fn, &label).into();
+        match syn::parse2::<syn::ImplItemFn>(expanded) {
+            Ok(new_method) => {
+                *method = new_method;
+                instrumented += 1;
+            }
+            Err(e) => return TokenStream::from(e.to_compile_error()),
+        }
+    }
+
+    if instrumented == 0 {
+        return TokenStream::from(
+            syn::Error::new_spanned(
+                &item_impl,
+                "#[budget_*] on this impl block instrumented no methods: it has no \
+                 functions, or every function already carries its own budget attribute",
+            )
+            .to_compile_error(),
+        );
+    }
+
+    TokenStream::from(quote! { #item_impl })
+}
+
 /// Builds one metric's measurement + assertion.
 ///
 /// Without a baseline this is the historical behaviour: measure, compare to
@@ -706,12 +815,7 @@ fn generate_prelude() -> proc_macro2::TokenStream {
     }
 }
 
-fn generate_budget_assert(spec: BudgetSpec, item: TokenStream) -> TokenStream {
-    let mut input_fn = match syn::parse2::<ItemFn>(item.into()) {
-        Ok(f) => f,
-        Err(e) => return TokenStream::from(e.to_compile_error()),
-    };
-
+fn generate_budget_assert(spec: BudgetSpec, mut input_fn: ItemFn, fn_label: &str) -> TokenStream {
     let env_ident = spec
         .env_ident
         .unwrap_or_else(|| proc_macro2::Ident::new("env", proc_macro2::Span::call_site()));
@@ -721,26 +825,36 @@ fn generate_budget_assert(spec: BudgetSpec, item: TokenStream) -> TokenStream {
     if let Some(limit) = spec.cpu {
         let limit_expr = generate_limit_expr(&limit, "budget_cpu_lt");
         let cost_ident = proc_macro2::Ident::new("cpu_cost", proc_macro2::Span::call_site());
+        let (plain, marginal) = assert_messages(
+            "CPU instruction cost",
+            "local estimate, real network cost may differ significantly in either direction",
+            fn_label,
+        );
         asserts.push(generate_metric_assert(
             &cost_ident,
             quote! { budget.cpu_instruction_cost() },
             &limit_expr,
             spec.cpu_baseline.as_ref(),
-            "CPU instruction cost {} exceeded limit {} - local estimate, real network cost may differ significantly in either direction",
-            "CPU instruction cost {} exceeded limit {} (marginal: {} measured - {} baseline) - local estimate, real network cost may differ significantly in either direction",
+            &plain,
+            &marginal,
         ));
     }
 
     if let Some(limit) = spec.mem {
         let limit_expr = generate_limit_expr(&limit, "budget_mem_lt");
         let cost_ident = proc_macro2::Ident::new("mem_cost", proc_macro2::Span::call_site());
+        let (plain, marginal) = assert_messages(
+            "Memory bytes cost",
+            "local estimate, real network cost may differ significantly in either direction",
+            fn_label,
+        );
         asserts.push(generate_metric_assert(
             &cost_ident,
             quote! { budget.memory_bytes_cost() },
             &limit_expr,
             spec.mem_baseline.as_ref(),
-            "Memory bytes cost {} exceeded limit {} - local estimate, real network cost may differ significantly in either direction",
-            "Memory bytes cost {} exceeded limit {} (marginal: {} measured - {} baseline) - local estimate, real network cost may differ significantly in either direction",
+            &plain,
+            &marginal,
         ));
     }
 
@@ -853,47 +967,48 @@ pub fn budget_cpu_lt(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(s) => s,
         Err(e) => return TokenStream::from(e.to_compile_error()),
     };
-    generate_budget_assert(
-        BudgetSpec {
-            cpu: Some(spec.limit),
-            mem: None,
-            cpu_baseline: spec.baseline,
-            mem_baseline: None,
-            env_ident: None,
-        },
-        item,
-    )
+    expand_targets(item, |input_fn, fn_label| {
+        generate_budget_assert(
+            BudgetSpec {
+                cpu: Some(spec.limit.clone()),
+                mem: None,
+                cpu_baseline: spec.baseline.clone(),
+                mem_baseline: None,
+                env_ident: None,
+            },
+            input_fn,
+            fn_label,
+        )
+    })
 }
 
-/// Asserts that the ledger write bytes used by `env` are less than N.
-///
-/// Write bytes represent the total bytes written to ledger storage during
-/// contract execution. This macro measures the local `memory_bytes_cost` as a
-/// proxy, which correlates with storage serialization overhead even though the
-/// exact on-network write-bytes figure is only available via RPC simulation.
-/// Must be placed on a test function that has a local `env` variable.
-#[proc_macro_attribute]
-pub fn budget_write_bytes_lt(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let spec = match syn::parse::<StandaloneSpec>(attr) {
-        Ok(s) => s,
-        Err(e) => return TokenStream::from(e.to_compile_error()),
-    };
-    let mut input_fn = match syn::parse::<ItemFn>(item) {
-        Ok(f) => f,
-        Err(e) => return TokenStream::from(e.to_compile_error()),
-    };
-
-    let limit_expr = generate_limit_expr(&spec.limit, "budget_write_bytes_lt");
+/// Shared expansion for the two ledger-bytes proxy macros
+/// (`budget_write_bytes_lt` / `budget_read_bytes_lt`), which differ only in
+/// their metric label and failure phrasing. Both proxy the figure through
+/// `memory_bytes_cost()`.
+fn generate_bytes_proxy_assert(
+    spec: StandaloneSpec,
+    mut input_fn: ItemFn,
+    metric_label: &str,
+    metric_phrase: &str,
+    fn_label: &str,
+) -> TokenStream {
+    let limit_expr = generate_limit_expr(&spec.limit, metric_label);
 
     let env_ident = proc_macro2::Ident::new("env", proc_macro2::Span::call_site());
-    let cost_ident = proc_macro2::Ident::new("write_bytes_cost", proc_macro2::Span::call_site());
+    let cost_ident = proc_macro2::Ident::new("bytes_proxy_cost", proc_macro2::Span::call_site());
+    let (plain, marginal) = assert_messages(
+        metric_phrase,
+        "local estimate, underestimates real network cost",
+        fn_label,
+    );
     let assert_tokens = generate_metric_assert(
         &cost_ident,
         quote! { budget.memory_bytes_cost() },
         &limit_expr,
         spec.baseline.as_ref(),
-        "Write bytes cost (memory proxy) {} exceeded limit {} - local estimate, underestimates real network cost",
-        "Write bytes cost (memory proxy) {} exceeded limit {} (marginal: {} measured - {} baseline) - local estimate, underestimates real network cost",
+        &plain,
+        &marginal,
     );
 
     let prelude = generate_prelude();
@@ -910,6 +1025,31 @@ pub fn budget_write_bytes_lt(attr: TokenStream, item: TokenStream) -> TokenStrea
 
     TokenStream::from(quote! {
         #input_fn
+    })
+}
+
+/// Asserts that the ledger write bytes used by `env` are less than N.
+///
+/// Write bytes represent the total bytes written to ledger storage during
+/// contract execution. This macro measures the local `memory_bytes_cost` as a
+/// proxy, which correlates with storage serialization overhead even though the
+/// exact on-network write-bytes figure is only available via RPC simulation.
+/// Must be placed on a test function (or a budget-annotated `impl` block) that
+/// has a local `env` variable.
+#[proc_macro_attribute]
+pub fn budget_write_bytes_lt(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let spec = match syn::parse::<StandaloneSpec>(attr) {
+        Ok(s) => s,
+        Err(e) => return TokenStream::from(e.to_compile_error()),
+    };
+    expand_targets(item, |input_fn, fn_label| {
+        generate_bytes_proxy_assert(
+            spec.clone(),
+            input_fn,
+            "budget_write_bytes_lt",
+            "Write bytes cost (memory proxy)",
+            fn_label,
+        )
     })
 }
 
@@ -975,38 +1115,14 @@ pub fn budget_read_bytes_lt(attr: TokenStream, item: TokenStream) -> TokenStream
         Ok(s) => s,
         Err(e) => return TokenStream::from(e.to_compile_error()),
     };
-    let mut input_fn = match syn::parse::<ItemFn>(item) {
-        Ok(f) => f,
-        Err(e) => return TokenStream::from(e.to_compile_error()),
-    };
-
-    let limit_expr = generate_limit_expr(&spec.limit, "budget_read_bytes_lt");
-
-    let env_ident = proc_macro2::Ident::new("env", proc_macro2::Span::call_site());
-    let cost_ident = proc_macro2::Ident::new("read_bytes_cost", proc_macro2::Span::call_site());
-    let assert_tokens = generate_metric_assert(
-        &cost_ident,
-        quote! { budget.memory_bytes_cost() },
-        &limit_expr,
-        spec.baseline.as_ref(),
-        "Read bytes cost (memory proxy) {} exceeded limit {} - local estimate, underestimates real network cost",
-        "Read bytes cost (memory proxy) {} exceeded limit {} (marginal: {} measured - {} baseline) - local estimate, underestimates real network cost",
-    );
-
-    let prelude = generate_prelude();
-    let assertion = quote! {
-        {
-            let budget = #env_ident.cost_estimate().budget();
-            #assert_tokens
-        }
-    };
-
-    if let Some(tokens) = instrument_exit_paths(&mut input_fn, prelude, assertion) {
-        return tokens;
-    }
-
-    TokenStream::from(quote! {
-        #input_fn
+    expand_targets(item, |input_fn, fn_label| {
+        generate_bytes_proxy_assert(
+            spec.clone(),
+            input_fn,
+            "budget_read_bytes_lt",
+            "Read bytes cost (memory proxy)",
+            fn_label,
+        )
     })
 }
 
@@ -1079,16 +1195,19 @@ pub fn budget_mem_lt(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(s) => s,
         Err(e) => return TokenStream::from(e.to_compile_error()),
     };
-    generate_budget_assert(
-        BudgetSpec {
-            cpu: None,
-            mem: Some(spec.limit),
-            cpu_baseline: None,
-            mem_baseline: spec.baseline,
-            env_ident: None,
-        },
-        item,
-    )
+    expand_targets(item, |input_fn, fn_label| {
+        generate_budget_assert(
+            BudgetSpec {
+                cpu: None,
+                mem: Some(spec.limit.clone()),
+                cpu_baseline: None,
+                mem_baseline: spec.baseline.clone(),
+                env_ident: None,
+            },
+            input_fn,
+            fn_label,
+        )
+    })
 }
 
 /// Asserts that the CPU and/or memory bytes used by `env` are less than specified limits.
@@ -1109,7 +1228,9 @@ pub fn budget_lt(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(s) => s,
         Err(e) => return TokenStream::from(e.to_compile_error()),
     };
-    generate_budget_assert(spec, item)
+    expand_targets(item, |input_fn, fn_label| {
+        generate_budget_assert(spec.clone(), input_fn, fn_label)
+    })
 }
 
 // ---------------------------------------------------------------------------
