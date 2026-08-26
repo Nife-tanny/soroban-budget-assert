@@ -694,6 +694,8 @@ This section is the **complete** flag reference: every `#[arg(...)]` field decla
 | `--record-baseline <PATH>` | — | none | Write a new resource-usage baseline snapshot to `PATH` (conventionally `budget-baseline.toml`) and exit, instead of printing a report. Requires an explicit path argument — `--record-baseline` with no value is a clap parse error, not an implicit default filename. See [Step 6 of the End-User Guide](user_guide.md#step-6-optional-catch-regressions-on-the-workspace-with-a-baseline). |
 | `--check-baseline <PATH>` | — | none | Check current measurements against the baseline snapshot at `PATH`, applying the configured regression tolerance (`--tolerance` / `tolerance` / per-function override). Exits non-zero on any regression beyond tolerance. Mutually exclusive in effect with `--record-baseline` — passing both resolves to whichever `Mode` is checked first in `Mode::from_args` (record wins); do not rely on that ordering, pass only one. |
 | `--tolerance <F>` | `tolerance` (top-level) and `[functions.<name>].tolerance` (per-function) | `0.10` | Regression tolerance for `--check-baseline`, as a fraction (`0.10`) or a percentage (`"10%"`). CLI flag overrides the file's top-level `tolerance` — **except** a function's own `[functions.<name>].tolerance`, which outranks even this flag for that function. See [Value precedence](#value-precedence). |
+| `--markdown` | — | `false` | With `--check-baseline`, render the comparison as a GitHub-flavored Markdown diff table instead of the plain-text one — baseline / current / absolute change / percentage change per metric, direction as an ASCII marker so it survives CI logs. Intended for `$GITHUB_STEP_SUMMARY`. Ignored without `--check-baseline`; `--json` wins if both are set. See [Baseline comparison output](#baseline-comparison-output). |
+| `--hide-unchanged` | — | `false` | With `--check-baseline`, drop metrics whose value is unchanged from the baseline. In Markdown, the default instead collapses them into a `<details>` block; this flag omits them from both formats. |
 | `--max-retry-attempts <N>` | `[retry].max_attempts` | `4` | Total attempts (including the first) for deploy, invoke-build, and simulate-RPC calls before giving up. `1` disables retry entirely; `0` is rejected with an error. See [`retry`: transient-failure retry policy](#retry-transient-failure-retry-policy) and the [testnet troubleshooting guide](testnet_troubleshooting.md) for what actually gets retried. |
 | `--retry-backoff-secs <SECS>` | `[retry].initial_backoff_secs` | `2` | Initial backoff before the first retry; doubles on each subsequent attempt (2 → 4 → 8 with the defaults). |
 | `--derive-limits <OUT>` | — | none | Derive local (Tier A) test limits from a Tier B JSON report and write them as `KEY=VALUE` pairs to `OUT`, then exit — no build/deploy/simulate happens in this mode. Reads the Tier B report from `--from` (or stdin). Requires either all four `--margin-*` flags or a complete `[margin]` block in `budget.toml`; see [`margin`: deriving Tier A limits](#margin-deriving-tier-a-limits). |
@@ -713,7 +715,7 @@ This section is the **complete** flag reference: every `#[arg(...)]` field decla
 - **`--csv` / `--json` / `--html` are mutually exclusive in effect, not by `conflicts_with`.** clap does not reject combining them; the renderer picks one output in a fixed priority order (`--csv` first, then `--json`, then `--html`, then the plain-text table). See [Output-format precedence](#output-format-precedence-when-flags-combine).
 - **`--record` and `--replay` *are* enforced as mutually exclusive** via clap's `conflicts_with`, so passing both is a parse-time error naming both flags — unlike the `--csv`/`--json`/`--html` case above.
 - **`--derive-limits` changes what every other network/build flag means.** In derive mode the tool never builds, deploys, or simulates anything; `--network`, `--source`, `--profile`, `--record`, `--replay`, and the retry flags are all irrelevant to that run. Only `--from`, `--margin-*`, and `--provenance-out` matter.
-- **`--record-baseline` / `--check-baseline` also short-circuit the legacy report path**, similarly to `--derive-limits`: `--json` still applies (it selects JSON vs. text rendering of the *baseline* report), but `--csv`, `--html`, and `--check` do not apply in these modes.
+- **`--record-baseline` / `--check-baseline` also short-circuit the legacy report path**, similarly to `--derive-limits`: `--json` still applies (it selects JSON vs. text rendering of the *baseline* report), and `--markdown` selects a Markdown diff table when `--json` is not set; `--csv`, `--html`, and `--check` do not apply in these modes. `--hide-unchanged` only affects the `--check-baseline` text/Markdown output.
 - **`--tolerance` is overridden, not overriding, in one specific case**: a function's own `[functions.<name>].tolerance` in `budget.toml` wins even over an explicit `--tolerance` flag. Every other file-vs-flag precedence in this tool goes the other way (flag wins). See [Value precedence](#value-precedence).
 - **`--max-retry-attempts` / `--retry-backoff-secs`** apply identically whether or not `--record-baseline`/`--check-baseline`/`--derive-limits` are active, because they gate the same underlying deploy/invoke/simulate calls those modes still make (except `--derive-limits`, which makes none).
 
@@ -966,6 +968,23 @@ There are no external CSS files, scripts, or fonts — the page works from a `fi
 
 ```bash
 cargo budget-report --html > budget-report.html
+```
+
+### Baseline comparison output (`--check-baseline`)
+
+By default `--check-baseline` prints a plain-text table. `--markdown` switches it to a GitHub-flavored Markdown diff table for `$GITHUB_STEP_SUMMARY`, and `--json` (which wins over `--markdown`) emits the machine-readable form. All three carry the same data.
+
+Both table forms show, per metric: **baseline**, **current**, **absolute change** (signed), **percentage change** (signed; `n/a` when the baseline is zero), a **direction** marker (`^` up / `v` down / `=` flat — text, never colour, so it survives CI logs and step summaries), and a **status** that tells apart:
+
+- `improved` — current is below baseline;
+- `unchanged` — byte-for-byte identical;
+- `within tolerance` — increased but under `baseline * (1 + tolerance)`;
+- `BREACH (max N)` — over the ceiling; this is the only status that exits the run non-zero.
+
+Unchanged metrics: shown inline in text; collapsed into a `<details>` block in Markdown. `--hide-unchanged` omits them from both. New functions (present now, absent from the baseline) and stale entries (in the baseline, gone from the WASM) are listed after the table with a `--record-baseline` hint; neither affects the exit code.
+
+```bash
+cargo budget-report --check-baseline --markdown >> "$GITHUB_STEP_SUMMARY"
 ```
 
 ## Measurement scope

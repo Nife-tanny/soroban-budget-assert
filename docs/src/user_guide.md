@@ -164,6 +164,14 @@ tolerance = 0.05                    # tighter override for a known-sensitive cal
 
 A single bad commit can no longer ride the `--check-baseline` gate; the rest of the workflow (tier-A macros, the textual report, `--json` for scripts) is unchanged.
 
+To surface the comparison in the PR's checks, append a Markdown diff table to the job summary:
+
+```bash
+cargo budget-report --check-baseline --markdown >> "$GITHUB_STEP_SUMMARY"
+```
+
+It shows baseline, current, absolute and percentage change per metric, with a text direction marker (no colour) and a status that separates a real tolerance breach from a value that merely moved. Add `--hide-unchanged` to keep it to the rows that changed. See [Baseline comparison output](reference.md#baseline-comparison-output-check-baseline).
+
 ## Step 7 (optional): Watch mode for iterative development
 
 When iterating on a function that is over budget, you want to know whether each change moved the number — without running a full `cargo budget-report` by hand every time. Watch mode automates this loop:
