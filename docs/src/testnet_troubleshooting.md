@@ -8,17 +8,19 @@ Every entry below is labelled either **reproduced** — the exact wording quoted
 
 ## First: is it hung, or is it retrying?
 
-Deploy, invoke-build, and the `simulateTransaction` RPC call are each wrapped in the same retry loop (`run_with_retry` in `main.rs`). By default that's **up to 4 attempts, with the delay before each retry doubling**: 2s → 4s → 8s. Unless `--quiet` is passed, every retry prints a line to stderr before it sleeps:
+Deploy, invoke-build, and the `simulateTransaction` RPC call are each wrapped in the same retry loop (`run_with_retry` in `main.rs`). By default that's **up to 4 attempts, with the delay before each retry doubling**: 2s → 4s → 8s. Unless `--quiet` is passed, every retry prints a line to stderr naming the attempt and the reason it is retrying, then a spinner ticks for the length of the backoff so the wait does not look like a hang:
 
 ```
-Deploy attempt 1/4 failed. Retrying in 2 s...
-Deploy attempt 2/4 failed. Retrying in 4 s...
-Deploy attempt 3/4 failed. Retrying in 8 s...
+Deploy attempt 1/4 failed: Error: friendbot rate-limited (try again later). Retrying in 2 s...
+⠹ backing off 2 s before the next attempt
+Deploy attempt 2/4 failed: Error: friendbot rate-limited (try again later). Retrying in 4 s...
+⠹ backing off 4 s before the next attempt
+Deploy attempt 3/4 failed: Error: friendbot rate-limited (try again later). Retrying in 8 s...
 ```
 
-*(from source — the exact format string in `run_with_retry`.)*
+*(from source — the format string in `run_with_retry` and the `backoff_sleep` spinner. The spinner is drawn only on an interactive stderr; under `--quiet`, a redirect, or `--retry-backoff-secs 0` it is a plain sleep.)*
 
-With the default settings, the worst case for a single call site is `2 + 4 + 8 = 14` seconds of sleeping before it gives up — bounded and predictable, not a hang. If your terminal has sat silent for longer than that with no new output and no exit, something other than the documented retry loop is going on (network still connecting, DNS still resolving) — that's a genuine hang, not this mechanism.
+With the default settings, the worst case for a single call site is `2 + 4 + 8 = 14` seconds of sleeping before it gives up — bounded and predictable, not a hang. If your terminal has sat silent for longer than that with no new output and no exit (and no spinner), something other than the documented retry loop is going on (network still connecting, DNS still resolving) — that's a genuine hang, not this mechanism.
 
 To change this behavior:
 
@@ -34,6 +36,8 @@ The retry loop only re-attempts failures it classifies as **plausibly transient*
 `rate limit`, `rate-limited`, `ratelimit`, `429`, `too many requests`, `connection`, `timed out`, `timeout`, `reset by peer`, `broken pipe`, `503`, `502`, `unavailable`, `temporarily`, `try again`
 
 Anything else — including a missing contract, a bad XDR, or an RPC-reported simulation error — is treated as permanent and fails immediately. This is the practical way to tell the two failure classes apart: **if you saw retry lines in the output, the tool already decided this looked transient; if it failed on attempt 1 with no retry lines, it decided the failure was deterministic** — which almost always means something in your configuration, not the network, needs fixing.
+
+When a deploy does give up, a *second* classifier (`deploy_diagnostics::classify` in `main.rs`) reads the final error and picks the guidance to print — rate limiting, a service outage, an unreachable network, or an unfunded source account. Only the first three are worth retrying; an unfunded account is called out explicitly as something that will not resolve by waiting.
 
 ## Your configuration vs. a bad network day
 
@@ -53,11 +57,15 @@ Use the table below to go from the specific symptom to the specific cause.
 **Symptom:** Deploy fails, retries a few times with growing delays, then either succeeds or exhausts all 4 attempts with a final message like:
 
 ```
-Failed to deploy amm-pool-contract after 4 attempts. Ensure your source account is funded.
-Last error: Error: friendbot rate-limited (try again later)
+Failed to deploy amm-pool-contract after 4 attempts.
+Cause: rate limiting. Friendbot / the RPC is throttling requests from this IP.
+  What to do: wait ~60 seconds and re-run — the limit is per-IP and lifts on its
+  own. Running from CI on a shared runner makes this more likely; a short sleep
+  before the step usually clears it.
+Last error: stellar contract deploy failed: Error: friendbot rate-limited (try again later)
 ```
 
-*(from source — `deploy_contract_with_retry`'s error format, combined with the friendbot wording the `stellar` CLI itself returns and that this project's own test fixture at `cargo-budget-report/tests/fixtures/fake_bin/stellar` deliberately reproduces for `MOCK_STELLAR_FAIL_COUNT` tests.)*
+*(from source — `deploy_contract_with_retry` combined with `deploy_diagnostics::classify` picking the `RateLimited` guidance, and the friendbot wording the `stellar` CLI itself returns, which this project's own test fixture at `cargo-budget-report/tests/fixtures/fake_bin/stellar` reproduces for `MOCK_STELLAR_FAIL_COUNT` tests.)*
 
 **Cause:** Testnet's friendbot service rate-limits funding requests. Deploying a fresh (unfunded) source identity triggers a friendbot call as part of `stellar contract deploy`; under load, or when many CI jobs hit it in a short window, that call is throttled.
 
@@ -75,13 +83,25 @@ Last error: Error: friendbot rate-limited (try again later)
 
 **What to do:** Identical to rate limiting — this is exactly what the exponential backoff is for. No action needed beyond letting the retries run; a source identity that was already funded before this run won't hit this path at all.
 
-### Friendbot / testnet unavailable
+### Friendbot / testnet unavailable or unreachable
 
-**Symptom:** Deploy fails immediately or after retries with a connection-level error rather than an explicit rate-limit message — e.g. a `curl`/CLI-level connection failure surfacing through the same retry path.
+**Symptom:** Deploy fails (immediately or after retries) with guidance that is *not* the rate-limit one. The final classifier separates two sub-cases by the error text:
 
-**Cause:** Testnet infrastructure (friendbot, RPC, or both) is down or unreachable, as opposed to just being slow or rate-limiting you.
+```
+Cause: the deploy/funding service returned a server error — it is down or
+overloaded, not something on your side.
+  What to do: check https://status.stellar.org, then re-run in a few minutes.
+```
 
-**What to do:** Check [Stellar's status page](https://status.stellar.org/) before assuming your setup is broken. If testnet itself is down, no flag or configuration change here will help — wait it out. This is the one case where even a `--max-retry-attempts` increase won't save you; the 14-second default window (or whatever you've configured) is meant to ride out a blip, not an outage.
+```
+Cause: the network could not be reached (DNS / connection / timeout).
+  What to do: check your own connectivity, any proxy or VPN, and firewall rules
+  for outbound HTTPS to Stellar infrastructure, then re-run.
+```
+
+**Cause:** The first is a 5xx / "unavailable" response — testnet infrastructure is down or overloaded. The second is a connection-level failure (DNS, refused connection, timeout) — the request never reached a server, which more often points at your own egress than at testnet.
+
+**What to do:** For the service-error case, check [Stellar's status page](https://status.stellar.org/) and wait it out — no flag change helps ride out an outage. For the unreachable case, the problem is between you and the network: check connectivity, proxy/VPN, and outbound-HTTPS firewall rules.
 
 ### RPC unreachable (`simulateTransaction`)
 
@@ -181,6 +201,15 @@ Causes 2 and 3 are treated as run failures: a crate deliberately built as a `cdy
 **Symptom:** Deploy fails on the very first attempt — no retry lines — with a `stellar contract deploy failed: ...` message (**from source**, `LiveTransport::deploy_contract`'s error wrapper) whose actual text comes from the `stellar` CLI itself, not this tool. The tool cannot predict that text since it depends on the installed Stellar CLI version and your local identity configuration — this environment does not have the `stellar` CLI installed to reproduce it directly, so treat the CLI's own wording as authoritative over any paraphrase here.
 
 **Cause:** The identity named by `--source` (or `source` in `budget.toml`) either doesn't exist in your local Stellar CLI's keystore, or exists but isn't funded on the target network.
+
+When the CLI's error text carries a recognisable "underfunded / account not found" signal, the final classifier picks it out and prints the account-specific guidance, substituting your actual `--source` and `--network`:
+
+```
+Cause: the source account 'alice' is missing or unfunded on testnet.
+  What to do: fund it and re-run — `stellar keys fund alice --network testnet`
+  (or `stellar keys generate alice --network testnet --fund` to create it). This
+  will not resolve by waiting.
+```
 
 **What to do:**
 - Confirm the identity exists: `stellar keys ls`.
