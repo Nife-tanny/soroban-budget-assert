@@ -19,7 +19,6 @@ updates:
       #
       # Bump these manually, one migration per PR, via their issues:
       #   #382 — soroban-sdk / stellar-xdr
-      #   #383 — wasmparser
       #
       # REMOVE EACH ENTRY as its issue lands, so routine updates resume. While an
       # entry is here that crate gets no automated updates at all, security
@@ -28,13 +27,16 @@ updates:
       # `cargo_metadata` (0.18 -> 0.23) landed in #469 and was removed from this
       # list so routine updates resume.
       #
+      # `wasmparser` (0.116 -> 0.254) landed in #383 and was removed from this
+      # list so routine updates resume. Only cargo-budget-report's direct copy
+      # moved; soroban-env-host still pins =0.116.1 transitively.
+      #
       # `toml` (0.8 -> 1.1) and `tabled` (0.14 -> 0.21) are also majors in this
       # group. They are deliberately NOT ignored: nothing has shown them to be
       # breaking yet. If one turns out to be, give it its own issue and its own
       # entry rather than widening this list pre-emptively.
       - dependency-name: "soroban-sdk"
       - dependency-name: "stellar-xdr"
-      - dependency-name: "wasmparser"
 
   - package-ecosystem: "github-actions"
     directory: "/"

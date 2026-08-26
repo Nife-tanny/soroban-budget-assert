@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Table output**: Failed simulations now appear in a `--- FAILED SIMULATIONS ---` section below the main budget table. The summary line now reports both the number of successfully simulated functions and the number of failed ones.
 - **CSV output**: The `--csv` output now includes `status` and `failure_reason` columns. Without `--check`, the header is `status,package,function,metric,value,failure_reason`; with `--check`, it adds `limit,pass`.
 - **`SimulationFailure` enum**: Added `label()` and `detail()` methods for producing consistent, human-readable failure descriptions across all three failure paths (invoke failure, RPC error, metrics extraction failure).
+- **`wasmparser` bumped to `0.254` for `cargo-budget-report` (issue #383).** The dependency moves `0.116.1` -> `0.254.0`, split out from the `soroban-sdk`/`stellar-xdr` migration (#382) so a regression in either is attributable. The export-section walk that produces the simulation candidate list is extracted to `cargo-budget-report/src/wasm_exports.rs` and pinned by a fixture test; the parsing API (`Parser::parse_all`, `Payload::ExportSection`, `Export::{kind,name}`, `ExternalKind::Func`) is unchanged across the two versions and the pinned export set is byte-identical before and after. The `0.116.1` copy that `soroban-env-host` pins stays in the lock untouched.
 
 ### Fixed
 
