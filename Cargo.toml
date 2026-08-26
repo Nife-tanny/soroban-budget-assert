@@ -5,6 +5,7 @@ members = [
     "cargo-budget-report",
     "amm-pool-contract",
     "host-function-contract",
+    "bloat-contract",
 ]
 resolver = "2"
 
