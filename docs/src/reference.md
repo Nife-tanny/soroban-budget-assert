@@ -1030,7 +1030,8 @@ answering "how much will my users pay".
 - A run whose resolved network is Mainnet (or is unrecognised) aborts immediately, before anything is built or deployed, unless `--allow-mainnet` was passed. See [Mainnet guard](#mainnet-guard).
 - Build failure, deploy failure, or an unparsable RPC response aborts the run with a contextual error (via `anyhow`) — e.g., a deploy failure reports that the source account may be unfunded.
 - A failed simulation of a single function prints a warning and skips it; the report still prints for the functions that succeeded.
-- If nothing simulates successfully, the CLI prints `No successful simulations to report.` and exits 0.
+- A crate built as a `cdylib` whose WASM exports no contract entrypoint aborts the run non-zero, with a message identifying which of the three causes applies (not a `cdylib`, no exports at all, or only toolchain symbols). See [A contract that exports nothing simulatable](testnet_troubleshooting.md#a-contract-that-exports-nothing-simulatable).
+- If nothing simulates successfully and no such misconfiguration was found, the CLI prints `No successful simulations to report.` and exits 0.
 - When `--check` is passed:
   - Any limit breach exits non-zero.
   - Any function declared in `budget.toml` whose simulation fails also exits non-zero (the warning is still printed), so a broken simulation cannot look like a silent pass.

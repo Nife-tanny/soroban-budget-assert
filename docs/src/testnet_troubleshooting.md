@@ -135,24 +135,46 @@ The report still prints for every function that succeeded; a fully failed run in
 
 ### A contract that exports nothing simulatable
 
-Two distinct, silent-by-default cases, both worth knowing apart:
+The tool discovers what to simulate by parsing each contract's compiled WASM export section. When that yields nothing usable there are three distinct causes, and each now produces its own message naming the package and saying what to change (**from source**, the `contract_exports` module and its call sites in `main.rs` / `watch.rs`).
 
-**Case 1 — the package isn't a `cdylib` at all.** The tool discovers packages via `cargo metadata` and skips (with a plain Rust `continue`, no message of any kind) any package whose targets don't include a `cdylib` crate type (**from source**, the `is_cdylib` check in `main.rs`). If you expected a package to be built and simulated and it just never shows up anywhere in the output — not even a warning — check its `Cargo.toml` for:
+**Cause 1 — the crate isn't a `cdylib`.** A crate that pulls in `soroban-sdk` as a normal dependency but whose `[lib] crate-type` doesn't include `cdylib` produces no WASM at all. It is still skipped (there is nothing to build), but no longer in silence:
+
+```
+Package '<name>' depends on soroban-sdk but its `[lib] crate-type` does not
+include `cdylib`, so it produces no WASM and cannot be measured. Skipping.
+  Add `crate-type = ["cdylib"]` to its `[lib]` section (keep `rlib` too if
+  other crates depend on it) if it is meant to be a contract.
+```
+
+Fix it in `Cargo.toml`:
 
 ```toml
 [lib]
 crate-type = ["cdylib", "rlib"]
 ```
 
-A package missing `cdylib` here produces **zero output about itself**, which is easy to mistake for "it ran and had nothing to report" rather than "it was never considered."
-
-**Case 2 — it's a `cdylib`, but the compiled WASM exports no simulatable functions.** Once a package does build as a `cdylib`, the tool parses the compiled WASM's export section and simulates every function export except names starting with `_` and the special `memory` export. If that leaves nothing, you get an explicit message this time:
+**Cause 2 — a `cdylib` whose WASM has no function exports at all.** The crate compiled as a plain library, or the `#[contract]` / `#[contractimpl]` macros were never applied:
 
 ```
-No exported functions found in <package>
+Error: Package '<name>' built a WASM with no function exports.
+  The crate most likely compiled as a plain library, or the Soroban contract
+  macros (#[contract] / #[contractimpl]) were never applied.
+  Put #[contractimpl] on the contract's impl block and confirm its `[lib]
+  crate-type` includes `cdylib`, then rebuild.
 ```
 
-*(from source — the exact string in `main.rs`.)* This usually means every `pub fn` in the contract is either unintentionally private to the crate, or genuinely has no public entry points — check that your contract functions are on a `#[contractimpl]`-annotated `impl` block, which is what actually produces WASM exports for Soroban.
+**Cause 3 — a `cdylib` that exports functions, but none are contract entrypoints.** Every export is a toolchain symbol (`_start`, `__data_end`, …). The message lists what it found, so you can see the mismatch:
+
+```
+Error: Package '<name>' exports functions, but none match the Soroban contract
+calling convention.
+  Exports found: _start
+  Those are toolchain symbols, not contract entrypoints. Add #[contractimpl] to
+  the contract's impl block so its methods are exported under their own names,
+  then rebuild.
+```
+
+Causes 2 and 3 are treated as run failures: a crate deliberately built as a `cdylib` that produces no contract entrypoint is a real misconfiguration, so the run exits non-zero rather than reporting "no successful simulations" and exiting `0`.
 
 ### Missing or misconfigured identity
 
