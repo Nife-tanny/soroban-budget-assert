@@ -229,6 +229,40 @@ fn test_read_bytes_with_env_file() {
 }
 ```
 
+**Config-driven limit** — read from `budget.json` in the process working directory:
+
+```rust
+#[test]
+#[budget_read_bytes_lt(config = "read_bytes")]
+fn test_read_bytes_with_json_config() {
+    let env = Env::default();
+    // ...
+}
+```
+
+**Baseline subtraction** — `baseline = <expr>` subtracts a fixed floor from the
+measurement before it is compared, so the *marginal* read-bytes cost is what is
+asserted, exactly as for `budget_cpu_lt` / `budget_mem_lt` / `budget_write_bytes_lt`.
+The subtraction saturates at 0.
+
+```rust
+#[test]
+#[budget_read_bytes_lt(4096, baseline = instantiation_floor_read_bytes())]
+fn test_marginal_read_bytes() {
+    let env = Env::default();
+    // ...
+}
+```
+
+Failure message format:
+```
+Read bytes cost (memory proxy) {actual} exceeded limit {N} - local estimate, underestimates real network cost
+```
+and with a baseline:
+```
+Read bytes cost (memory proxy) {marginal} exceeded limit {N} (marginal: {measured} measured - {baseline} baseline) - local estimate, underestimates real network cost
+```
+
 ### `#[budget_scaling(…)]` — growth-model assertion
 
 Asserts that the CPU cost *grows* according to a declared model as input size
