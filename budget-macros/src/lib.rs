@@ -1,5 +1,7 @@
 extern crate proc_macro;
 
+use std::path::{Path, PathBuf};
+
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{quote, ToTokens};
@@ -80,6 +82,45 @@ impl Parse for StandaloneSpec {
             baseline: Some(baseline),
         })
     }
+}
+
+/// Resolves a literal `env_file` path at macro-expansion time, mirroring the
+/// candidate roots the generated runtime lookup walks.
+///
+/// Returns the first existing file, or `None` if the path resolves nowhere —
+/// which the caller turns into a compile error. The bases are, in order: the
+/// path as given (absolute or relative to the compiler's CWD), then
+/// `CARGO_MANIFEST_DIR` (the crate being compiled), each also probed through a
+/// `budget-macros/` / `../budget-macros/` prefix so the workspace-relative
+/// paths the runtime resolver accepts do not become build errors here.
+fn resolve_env_file_at_expansion(path: &str) -> Option<PathBuf> {
+    let raw = Path::new(path);
+    if raw.is_file() {
+        return Some(raw.to_path_buf());
+    }
+
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        bases.push(PathBuf::from(dir));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        bases.push(cwd);
+    }
+
+    for base in bases {
+        let direct = base.join(raw);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        for prefix in ["budget-macros", "../budget-macros"] {
+            let prefixed = base.join(prefix).join(raw);
+            if prefixed.is_file() {
+                return Some(prefixed);
+            }
+        }
+    }
+
+    None
 }
 
 /// True when the next tokens (optionally after a leading comma) name one of
@@ -187,6 +228,23 @@ impl Parse for BudgetLimit {
                 // `env_file = CONST_NAME`.
                 let path: proc_macro2::TokenStream = if input.peek(LitStr) {
                     let lit: LitStr = input.parse()?;
+                    // A literal path is knowable now, so a typo or a file that
+                    // was never checked in should fail the build here — not at
+                    // test runtime, and never silently. A non-literal path
+                    // (`env_file = CONST` / an expression) may be produced by
+                    // the build, so it stays a runtime resolution.
+                    if resolve_env_file_at_expansion(&lit.value()).is_none() {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            format!(
+                                "env_file {:?} was not found at macro-expansion time \
+                                 (looked relative to CARGO_MANIFEST_DIR and the build's \
+                                 working directory). Create the file, fix the path, or \
+                                 pass it as a `const` if it is generated during the build.",
+                                lit.value()
+                            ),
+                        ));
+                    }
                     lit.into_token_stream()
                 } else {
                     let expr: Expr = input.parse()?;
@@ -1339,4 +1397,35 @@ pub fn budget_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     generate_scaling_assert(config, input_fn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_env_file_at_expansion;
+
+    #[test]
+    fn resolves_a_path_relative_to_the_crate_manifest_dir() {
+        // Cargo sets CARGO_MANIFEST_DIR to `budget-macros/` for this crate's
+        // own tests, and `Cargo.toml` is guaranteed to sit there.
+        assert!(resolve_env_file_at_expansion("Cargo.toml").is_some());
+    }
+
+    #[test]
+    fn resolves_the_checked_in_ui_fixture_env_file() {
+        assert!(
+            resolve_env_file_at_expansion("tests/ui/support/pass_env_file.env").is_some(),
+            "the UI env_file fixture should resolve from the crate manifest dir"
+        );
+    }
+
+    #[test]
+    fn a_missing_path_resolves_to_none() {
+        assert!(resolve_env_file_at_expansion("definitely/not/a/real/limits.env").is_none());
+    }
+
+    #[test]
+    fn a_directory_is_not_accepted_as_an_env_file() {
+        // `is_file()` must gate every candidate, so `src` (a directory) is a miss.
+        assert!(resolve_env_file_at_expansion("src").is_none());
+    }
 }
