@@ -840,3 +840,58 @@ fn contract_that_exports_nothing_reports_the_specific_cause() {
         "the old undifferentiated message should not appear: {stderr}"
     );
 }
+
+#[test]
+fn check_baseline_markdown_renders_a_diff_table() {
+    let workspace = setup_mock_workspace();
+
+    // A hand-written baseline: ping's cpu is well under the ~1,000,000 the
+    // fake RPC reports, so it must show as a tolerance breach; pong matches
+    // exactly, so it is unchanged.
+    fs::write(
+        workspace.path().join("budget-baseline.toml"),
+        "[\"mock-contract-a::ping\"]\n\
+         cpu_instructions = 100000\n\
+         read_bytes = 2048\n\
+         write_bytes = 4096\n\
+         \n\
+         [\"mock-contract-b::pong\"]\n\
+         cpu_instructions = 1000000\n\
+         read_bytes = 2048\n\
+         write_bytes = 4096\n",
+    )
+    .expect("failed to write baseline");
+
+    let assert = budget_report_cmd(workspace.path())
+        .args([
+            "budget-report",
+            "--network",
+            "local",
+            "--source",
+            "alice",
+            "--check-baseline",
+            "budget-baseline.toml",
+            "--markdown",
+        ])
+        .assert();
+
+    // A regression exits non-zero.
+    let stdout =
+        String::from_utf8_lossy(&assert.failure().get_output().stdout.clone()).into_owned();
+
+    // Valid GitHub pipe table.
+    assert!(stdout
+        .contains("| Function | Metric | Baseline | Current | Change | Change % | Dir | Status |"));
+    assert!(stdout.contains("|---|---|--:|--:|--:|--:|:-:|:--|"));
+    // ping's cpu breached; the status names the ceiling and it is not colour.
+    assert!(
+        stdout.contains("`mock-contract-a::ping`") && stdout.contains("BREACH (max 110,000)"),
+        "cpu breach row present: {stdout}"
+    );
+    assert!(!stdout.contains('\u{1b}'), "no ANSI colour codes: {stdout}");
+    // pong is unchanged -> collapsed into <details> by default.
+    assert!(
+        stdout.contains("<details>") && stdout.contains("unchanged metric(s)"),
+        "unchanged rows collapsed: {stdout}"
+    );
+}
