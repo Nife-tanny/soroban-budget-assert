@@ -32,6 +32,7 @@ use tabled::settings::Modify;
 use tabled::{Table, Tabled};
 
 mod contract_exports;
+mod deploy_diagnostics;
 mod derive;
 mod error;
 mod network_guard;
@@ -193,12 +194,18 @@ where
         if attempt > 0 {
             let delay_secs = config.initial_backoff.as_secs() * 2u64.pow(attempt - 1);
             if !quiet {
+                // Keeps the "<label> attempt N/M failed" / "Retrying in" wording
+                // other call sites and tests rely on, and adds the reason so the
+                // user can see which failure class they are waiting on.
                 eprintln!(
-                    "{label} attempt {}/{} failed. Retrying in {} s...",
-                    attempt, config.max_attempts, delay_secs
+                    "{label} attempt {}/{} failed: {}. Retrying in {} s...",
+                    attempt,
+                    config.max_attempts,
+                    deploy_diagnostics::summarize(&last_error),
+                    delay_secs
                 );
             }
-            thread::sleep(Duration::from_secs(delay_secs));
+            backoff_sleep(Duration::from_secs(delay_secs), quiet);
         }
 
         match op() {
@@ -209,6 +216,30 @@ where
     }
 
     Err(exhausted(&last_error))
+}
+
+/// Sleep for the backoff interval, showing a spinner on an interactive
+/// stderr so the wait does not look like a hang. Falls back to a plain
+/// sleep when output is suppressed, redirected, or the delay is zero
+/// (`--retry-backoff-secs 0`, and the paths the test suite exercises).
+fn backoff_sleep(delay: Duration, quiet: bool) {
+    if quiet || delay.is_zero() || !std::io::stderr().is_terminal() {
+        thread::sleep(delay);
+        return;
+    }
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.yellow} {msg}")
+            .unwrap(),
+    );
+    spinner.set_message(format!(
+        "backing off {} s before the next attempt",
+        delay.as_secs()
+    ));
+    spinner.enable_steady_tick(Duration::from_millis(120));
+    thread::sleep(delay);
+    spinner.finish_and_clear();
 }
 
 /// Commented budget.toml template written by `cargo budget-report --init`.
@@ -1088,15 +1119,19 @@ fn run_preflight_checks(quiet: bool) -> Result<()> {
 }
 
 /// Deploys a contract WASM to the network through a [`transport::Transport`]
-/// and turns a failed deploy into the canonical user-facing error.
+/// and turns a failed deploy into an actionable user-facing error.
 ///
 /// Retrying is the live transport's job: [`live::LiveTransport`] wraps the
 /// `stellar contract deploy` call in the crate-wide retry machinery, which
 /// retries friendbot rate limits and other plausibly transient stderr (429,
 /// connection errors) up to `retry_config.max_attempts` times with
-/// exponential backoff and skips retrying deterministic failures. All this
-/// function does is report the outcome with the familiar "source account is
-/// funded" hint.
+/// exponential backoff and skips retrying deterministic failures.
+///
+/// When every attempt fails, this function classifies the last error into
+/// one of rate limiting / service outage / unreachable network / unfunded
+/// account (see [`deploy_diagnostics`]) and attaches the guidance for that
+/// class — rather than the old one-size-fits-all "ensure your source
+/// account is funded" line, which was only right for one of the four.
 pub(crate) fn deploy_contract_with_retry(
     transport: &mut impl transport::Transport,
     wasm_path: &Path,
@@ -1107,10 +1142,15 @@ pub(crate) fn deploy_contract_with_retry(
 ) -> Result<String> {
     match transport.deploy_contract(wasm_path, source, network, package_name) {
         Ok(contract_id) => Ok(contract_id),
-        Err(err) => Err(Error::Message(format!(
-            "Failed to deploy {} after {} attempts. Ensure your source account is funded.\nLast error: {}",
-            package_name, retry_config.max_attempts, err
-        ))),
+        Err(err) => {
+            let last_error = err.to_string();
+            let class = deploy_diagnostics::classify(&last_error);
+            Err(Error::Message(format!(
+                "Failed to deploy {package_name} after {} attempts.\n{}\nLast error: {last_error}",
+                retry_config.max_attempts,
+                class.guidance(source, network),
+            )))
+        }
     }
 }
 

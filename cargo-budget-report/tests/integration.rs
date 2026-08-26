@@ -354,9 +354,78 @@ fn retry_mechanism_fails_after_exhausting_all_attempts() {
         stderr.contains("after 4 attempts"),
         "stderr should mention exhausted retries, got: {stderr:?}"
     );
+    // The mock error is a friendbot rate-limit, so the guidance should be
+    // the rate-limit one — not the old one-size-fits-all "ensure your
+    // source account is funded" line.
     assert!(
-        stderr.contains("source account is funded"),
-        "stderr should mention source account funding, got: {stderr:?}"
+        stderr.contains("rate limiting") && stderr.contains("60 seconds"),
+        "rate-limit failures should get rate-limit guidance with a wait: {stderr:?}"
+    );
+    // Each backoff should have reported which failure it was waiting on.
+    assert!(
+        stderr.contains("Deploy attempt 1/4 failed: ")
+            && stderr.contains("rate-limited")
+            && stderr.contains("Retrying in"),
+        "each retry should report the reason it is retrying: {stderr:?}"
+    );
+}
+
+#[test]
+fn unfunded_account_deploy_failure_gets_account_guidance() {
+    let workspace = setup_mock_workspace();
+    let fail_count_file = workspace.path().join(".mock_stellar_fail_count_unfunded");
+    let _ = fs::remove_file(&fail_count_file);
+
+    let assert = budget_report_cmd(workspace.path())
+        .args(["budget-report", "--network", "testnet", "--source", "alice"])
+        .env("MOCK_STELLAR_FAIL_COUNT", "10")
+        .env(
+            "MOCK_STELLAR_FAIL_COUNT_FILE",
+            fail_count_file.to_str().unwrap(),
+        )
+        .env(
+            "MOCK_STELLAR_DEPLOY_ERROR",
+            "error: transaction submission failed: txInsufficientBalance (source account underfunded)",
+        )
+        .assert();
+
+    let stderr =
+        String::from_utf8_lossy(&assert.failure().get_output().stderr.clone()).into_owned();
+    assert!(
+        stderr.contains("source account 'alice' is missing or unfunded on testnet"),
+        "an unfunded-account failure names the identity and network: {stderr}"
+    );
+    assert!(
+        stderr.contains("stellar keys fund alice --network testnet")
+            && stderr.contains("not resolve by waiting"),
+        "and gives the exact fix: {stderr}"
+    );
+}
+
+#[test]
+fn unreachable_network_deploy_failure_gets_connectivity_guidance() {
+    let workspace = setup_mock_workspace();
+    let fail_count_file = workspace.path().join(".mock_stellar_fail_count_net");
+    let _ = fs::remove_file(&fail_count_file);
+
+    let assert = budget_report_cmd(workspace.path())
+        .args(["budget-report", "--network", "testnet", "--source", "alice"])
+        .env("MOCK_STELLAR_FAIL_COUNT", "10")
+        .env(
+            "MOCK_STELLAR_FAIL_COUNT_FILE",
+            fail_count_file.to_str().unwrap(),
+        )
+        .env(
+            "MOCK_STELLAR_DEPLOY_ERROR",
+            "error sending request: connection reset by peer",
+        )
+        .assert();
+
+    let stderr =
+        String::from_utf8_lossy(&assert.failure().get_output().stderr.clone()).into_owned();
+    assert!(
+        stderr.contains("network could not be reached"),
+        "a connectivity failure is distinguished from rate limiting: {stderr}"
     );
 }
 
