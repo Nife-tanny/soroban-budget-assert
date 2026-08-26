@@ -30,6 +30,18 @@ pub struct BudgetReportArgs {
     #[arg(long)]
     pub source: Option<String>,
 
+    /// Permit the run to build and deploy against a non-disposable network.
+    ///
+    /// `cargo budget-report` deploys a contract and simulates calls against
+    /// it. Against testnet, futurenet, or a local network that is free and
+    /// throwaway. Against Stellar Mainnet it funds a source account and
+    /// pushes a contract using real funds. Without this flag the run stops
+    /// before building anything when the resolved network is Mainnet — or
+    /// when it cannot be recognised as disposable, which is treated the same
+    /// way rather than assumed safe.
+    #[arg(long, default_value_t = false)]
+    pub allow_mainnet: bool,
+
     #[arg(long, default_value_t = false, conflicts_with = "csv")]
     pub json: bool,
 

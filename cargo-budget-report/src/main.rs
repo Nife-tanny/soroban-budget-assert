@@ -34,6 +34,7 @@ use wasmparser::Parser as WasmParser;
 
 mod derive;
 mod error;
+mod network_guard;
 mod watch;
 
 /// Maximum number of total deployment attempts (1 initial + 3 retries)
@@ -1442,6 +1443,7 @@ fn main() -> anyhow::Result<()> {
             .clone()
             .or(toml_config.source.clone())
             .context("missing --source or budget.toml source field")?;
+        network_guard::ensure_deploy_allowed(&network, args.allow_mainnet)?;
         return watch::watch_loop(
             &args,
             metadata,
@@ -1461,6 +1463,11 @@ fn main() -> anyhow::Result<()> {
         .source
         .or(toml_config.source.clone())
         .context("missing --source or budget.toml source field")?;
+
+    // Refuse to build/deploy against Mainnet (or an unrecognised network)
+    // unless --allow-mainnet was passed. This runs before workspace
+    // discovery so no contract is built, funded, or deployed first.
+    network_guard::ensure_deploy_allowed(&network, args.allow_mainnet)?;
 
     if !args.quiet {
         eprintln!("Discovering workspace members...");
@@ -2565,6 +2572,7 @@ mod tests {
             force: false,
             network: None,
             source: None,
+            allow_mainnet: false,
             json: false,
             check: false,
             csv: false,
@@ -2599,6 +2607,7 @@ mod tests {
             force: false,
             network: None,
             source: None,
+            allow_mainnet: false,
             json: false,
             check: false,
             csv: false,
@@ -2633,6 +2642,7 @@ mod tests {
             force: false,
             network: None,
             source: None,
+            allow_mainnet: false,
             json: false,
             check: false,
             csv: false,
@@ -2670,6 +2680,7 @@ mod tests {
             force: false,
             network: None,
             source: None,
+            allow_mainnet: false,
             json: false,
             check: false,
             csv: false,

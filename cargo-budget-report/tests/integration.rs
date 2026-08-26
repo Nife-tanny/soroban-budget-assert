@@ -649,3 +649,81 @@ fn record_then_replay_produces_identical_report() {
         "replaying the fixture must reproduce the recorded report byte-for-byte"
     );
 }
+
+#[test]
+fn mainnet_is_refused_and_nothing_is_built() {
+    let workspace = setup_mock_workspace();
+
+    let assert = budget_report_cmd(workspace.path())
+        .args(["budget-report", "--network", "mainnet", "--source", "alice"])
+        .assert();
+
+    let output = assert.failure().get_output().clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Mainnet"), "names the network: {stderr}");
+    assert!(
+        stderr.contains("--allow-mainnet"),
+        "says how to proceed: {stderr}"
+    );
+    // The guard runs before workspace discovery, so no package is built.
+    assert!(
+        !stderr.contains("Building package"),
+        "guard must stop the run before building: {stderr}"
+    );
+}
+
+#[test]
+fn unrecognised_network_is_refused_without_opt_in() {
+    let workspace = setup_mock_workspace();
+
+    let assert = budget_report_cmd(workspace.path())
+        .args([
+            "budget-report",
+            "--network",
+            "some-private-net",
+            "--source",
+            "alice",
+        ])
+        .assert();
+
+    let stderr =
+        String::from_utf8_lossy(&assert.failure().get_output().stderr.clone()).into_owned();
+    assert!(
+        stderr.contains("unrecognised network"),
+        "an unknown network is treated as unsafe: {stderr}"
+    );
+}
+
+#[test]
+fn mainnet_with_opt_in_proceeds() {
+    let workspace = setup_mock_workspace();
+
+    let assert = budget_report_cmd(workspace.path())
+        .args([
+            "budget-report",
+            "--network",
+            "mainnet",
+            "--source",
+            "alice",
+            "--allow-mainnet",
+        ])
+        .assert();
+
+    let stdout =
+        String::from_utf8_lossy(&assert.success().get_output().stdout.clone()).into_owned();
+    assert!(
+        stdout.contains("WORKSPACE BUDGET REPORT"),
+        "with --allow-mainnet the run proceeds normally: {stdout}"
+    );
+}
+
+#[test]
+fn testnet_is_unaffected_by_the_guard() {
+    let workspace = setup_mock_workspace();
+
+    let assert = budget_report_cmd(workspace.path())
+        .args(["budget-report", "--network", "testnet", "--source", "alice"])
+        .assert();
+
+    assert.success().stdout(contains("WORKSPACE BUDGET REPORT"));
+}
