@@ -680,6 +680,7 @@ This section is the **complete** flag reference: every `#[arg(...)]` field decla
 |---|---|---|---|
 | `--network <NETWORK>` | `network` | none — required from one source | Network to deploy and invoke against, e.g. `testnet` (passed straight through to the `stellar` CLI). CLI flag wins over the file; missing from both is a fatal error naming the field. **Does not** actually change what the simulate step targets — see [the discrepancy note](#--network-does-not-actually-route-the-simulate-step) below. |
 | `--source <SOURCE>` | `source` | none — required from one source | Funded Stellar identity used for deploy fees and as the simulation source. Same precedence as `--network`. |
+| `--allow-mainnet` | — | `false` | Permit the run to build and deploy against a non-disposable network. Without it, a run whose *resolved* network is Stellar Mainnet — or a network that cannot be recognised as disposable — stops before building anything. See [Mainnet guard](#mainnet-guard) below. |
 | `--json` | — | `false` | Emit the report as pretty-printed JSON instead of a table. Composes with `--check` (adds `limit`/`pass` per entry) and with `--record-baseline`/`--check-baseline` (see [Output-format precedence](#output-format-precedence-when-flags-combine)). |
 | `--csv` | — | `false` | Emit the report as CSV instead of a table. Header is `package,function,metric,value` normally, or `package,function,metric,value,limit,pass` under `--check`. Rows whose `value` never simulated are only included in `--check` mode (they carry `pass=false`); in the non-`--check` CSV they are omitted entirely, unlike the JSON/table output, which lists them. Takes priority over `--json`/`--html` if more than one is passed — see [below](#output-format-precedence-when-flags-combine). |
 | `--html` | — | `false` | Emit the report as a single self-contained HTML page — no external CSS, scripts, or fonts, so it renders from a `file://` URL and from a downloaded CI artifact. Rows mirror the JSON output; with `--check` each row also shows its limit and pass/fail status. |
@@ -704,6 +705,7 @@ This section is the **complete** flag reference: every `#[arg(...)]` field decla
 | `--provenance-out <PATH>` | — | `<OUT>` with `.env` replaced by `.md` | Only meaningful with `--derive-limits`: where to write the Markdown provenance table documenting how each derived limit was computed. Defaults from `--derive-limits`'s own `OUT` path (e.g. `tier-a-limits.env` → `tier-a-limits.provenance.md`), so it rarely needs to be set explicitly. |
 | `--record <PATH>` | — | none | Record every transport response (deploy, invoke-build, simulate RPC) into a replayable fixture file at `PATH`. The run itself still talks to the network; the fixture lets a later `--replay` run reproduce the same report offline. Mutually exclusive with `--replay` (rejected by clap's `conflicts_with` at parse time, before any network call happens). |
 | `--replay <PATH>` | — | none | Replay a run from a fixture file written by `--record`. The whole report pipeline runs offline: no `stellar` CLI, no `curl`, no network access, and preflight checks for those tools are skipped entirely. Mutually exclusive with `--record`. |
+| `--watch` | — | `false` | Watch the workspace for source changes and re-measure affected packages on each save, printing a delta against the previous run. Refuses to start when stdout is not a terminal (CI guard). See [Step 7 of the End-User Guide](user_guide.md#step-7-optional-watch-mode-for-iterative-development). |
 
 ### Flags that interact
 
@@ -733,6 +735,20 @@ So `cargo budget-report --csv --json` prints CSV only; `--json --html` prints JS
 ### `--color` does not actually force colour into a pipe
 
 `--color`'s own doc comment in `cli.rs` says `Always` will "always emit colour, even into pipes and files." That is not what the implementation does: `color_enabled_with` (the pure decision function backing `--color`, exhaustively unit-tested in `main.rs`) returns `false` whenever stdout is not a terminal or `NO_COLOR` is set, **before** it even looks at whether the choice was `Always`, `Auto`, or `Never`. A test in the same module asserts this directly: `--color always` piped to a file or another process produces no ANSI escapes. In practice `--always` and `--auto` currently behave identically; only `--never` is distinguishable from the other two. This looks like an intentional safety choice (never corrupt a file or a downstream parser with escape codes) that the help text's wording never caught up to — the behavior was not changed here, since changing flag behavior is out of scope for this page; only the discrepancy is reported.
+
+### Mainnet guard
+
+`cargo budget-report` deploys a throwaway contract and simulates calls against it. On testnet, futurenet, or a local network that is free and disposable. Pointed at **Stellar Mainnet**, the same pipeline funds a source account and pushes a contract using real funds — and nothing else in the tool treats Mainnet differently from any other network. A single misconfigured `network` value is all that stands between a testnet run and a real one.
+
+Before any package is built, funded, or deployed, the tool classifies the network it is *about* to use:
+
+- **testnet / futurenet / local** — disposable. The run proceeds.
+- **Mainnet** — the run stops with a message naming the network and pointing at `--allow-mainnet`.
+- **anything else** — treated as **unsafe**, refused the same way as Mainnet. Defaulting to permissive for an unrecognised network is the failure mode this guard exists to prevent.
+
+The check is on the resolved network passphrase, not the `--network` spelling. A well-known alias (`testnet`, `mainnet`, `futurenet`, `local`, `pubnet`, …) or a full network passphrase is classified directly; any other alias is resolved against the Stellar CLI's own `network/<name>.toml` config where present, so pointing a familiar-looking alias at Mainnet's passphrase does not get past the guard. It cannot be bypassed by expressing the same endpoint a different way — only by `--allow-mainnet`.
+
+`--allow-mainnet` is the sole opt-in. It permits both Mainnet and an unrecognised network. Supporting Mainnet reporting *properly* — real fee accounting, a dry-run mode, spend limits — is a separate, larger question and is out of scope for the guard.
 
 ### `--network` does not actually route the simulate step
 
@@ -1011,6 +1027,7 @@ answering "how much will my users pay".
 
 ## Failure behavior
 
+- A run whose resolved network is Mainnet (or is unrecognised) aborts immediately, before anything is built or deployed, unless `--allow-mainnet` was passed. See [Mainnet guard](#mainnet-guard).
 - Build failure, deploy failure, or an unparsable RPC response aborts the run with a contextual error (via `anyhow`) — e.g., a deploy failure reports that the source account may be unfunded.
 - A failed simulation of a single function prints a warning and skips it; the report still prints for the functions that succeeded.
 - If nothing simulates successfully, the CLI prints `No successful simulations to report.` and exits 0.
