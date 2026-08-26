@@ -296,6 +296,33 @@ observed ratios, deviation, and all measurements.
 - The macro checks the *local* estimate, which can sit above or below the real network cost depending on the build profile. Set `N` a few percent above the measured local number to catch regressions, and use `cargo budget-report` for the network ground truth (see the End-User Guide).
 {% endhint %}
 
+### Limit sources and their precedence
+
+Every budget macro accepts the limit as one of four forms. They do not stack —
+a limit comes from exactly one source, decided by the keys you write:
+
+| Form | Where the limit is read from | When |
+|---|---|---|
+| `N` (integer literal) | the attribute itself | macro expansion |
+| `config = "KEY"` | `budget.json` in the process working directory | test runtime |
+| `env = "VAR"` | the `VAR` process environment variable | test runtime |
+| `env_file = "PATH", env = "VAR"` | the `VAR` key inside the `KEY=VALUE` file at `PATH` | test runtime |
+
+`env_file` **overrides `env` for that one test**: with both keys present the
+limit is read from the file, never from the process environment, so two tests
+in the same suite can resolve the same logical limit from different files by
+carrying different `env_file` paths. A test with no `env_file` is unaffected
+and keeps reading `VAR` from the process environment.
+
+**`env_file` path resolution.** A *literal* path (`env_file = "../limits.env"`)
+must resolve to a file at macro-expansion time — checked against
+`CARGO_MANIFEST_DIR`, the build's working directory, and a `budget-macros/`
+fallback — or the build fails with an error naming the path. A *non-literal*
+path (`env_file = SOME_CONST`) is assumed to be produced by the build and is
+resolved at test runtime instead; a missing file then panics the test (it is
+never treated as "no limit"). At runtime the file is re-read per assertion, so
+the mechanism is thread-safe and needs no `unsafe std::env::set_var`.
+
 ## Soroban Budget API
 
 The macros and manual tests interact with the Soroban budget API through `env.cost_estimate().budget()`. The key methods are:
