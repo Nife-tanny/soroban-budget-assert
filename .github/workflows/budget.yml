@@ -38,7 +38,14 @@ jobs:
       # invocations below, so fork PRs still run Tier A only.
 
       - name: Build Contracts
-        run: cargo build -p amm-pool-contract --release --target wasm32v1-none
+        # All contract fixtures the Tier A / measurement tests register from
+        # `target/wasm32v1-none/release/`. The measurement tests for the
+        # crypto, token-transfer, call-depth and deploy-cost gap series
+        # (issues #414–#417) read host-function-contract and bloat-contract
+        # wasm alongside amm-pool-contract.
+        run: >-
+          cargo build --release --target wasm32v1-none
+          -p amm-pool-contract -p host-function-contract -p bloat-contract
 
       - name: Run Budget Macros Test (Tier A)
         run: cargo test
