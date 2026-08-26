@@ -18,7 +18,7 @@ use compare::{
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,10 +29,10 @@ use tabled::settings::object::Rows;
 use tabled::settings::Color as TabledColor;
 use tabled::settings::Modify;
 use tabled::{Table, Tabled};
-use wasmparser::Parser as WasmParser;
 
 mod derive;
 mod error;
+mod wasm_exports;
 
 /// Maximum number of total deployment attempts (1 initial + 3 retries)
 /// when friendbot funding is suspected to have failed transiently
@@ -1527,25 +1527,13 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        // Parse WASM exports
+        // Parse WASM exports. The export-section walk lives in
+        // `wasm_exports` so its output is pinned by a unit test — see the
+        // module docs.
         let wasm_bytes = std::fs::read(&wasm_path)?;
         let wasm_size: u32 = wasm_bytes.len().try_into().unwrap_or(u32::MAX);
-        let mut exported_fns: HashSet<String> = HashSet::new();
-
-        for payload in WasmParser::new(0).parse_all(&wasm_bytes) {
-            if let wasmparser::Payload::ExportSection(export_section) = payload? {
-                for export_item in export_section {
-                    let export_item = export_item?;
-                    if export_item.kind == wasmparser::ExternalKind::Func {
-                        let name = export_item.name.to_string();
-                        // Ignore internal and common exports
-                        if !name.starts_with('_') && name != "memory" {
-                            exported_fns.insert(name);
-                        }
-                    }
-                }
-            }
-        }
+        let exported_fns = wasm_exports::parse_exported_functions(&wasm_bytes)
+            .with_context(|| format!("parsing WASM exports for package '{}'", package.name))?;
 
         if exported_fns.is_empty() {
             if !args.quiet {
