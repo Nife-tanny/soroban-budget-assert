@@ -74,6 +74,25 @@ pub struct BudgetReportArgs {
     #[arg(long)]
     pub tolerance: Option<String>,
 
+    /// Render the `--check-baseline` comparison as a GitHub-flavored
+    /// Markdown diff table instead of the plain-text one.
+    ///
+    /// Each row shows baseline, current, absolute change, and percentage
+    /// change; direction is an ASCII marker (not colour) so it survives CI
+    /// logs and step summaries, which is this format's main destination.
+    /// Only meaningful with `--check-baseline`; ignored otherwise. `--json`
+    /// wins if both are passed.
+    #[arg(long, default_value_t = false)]
+    pub markdown: bool,
+
+    /// Drop rows whose value is unchanged from the baseline in the
+    /// `--check-baseline` comparison.
+    ///
+    /// In the Markdown output the default instead collapses unchanged rows
+    /// into a `<details>` block; this flag omits them from both formats.
+    #[arg(long, default_value_t = false)]
+    pub hide_unchanged: bool,
+
     /// Suppress non-essential progress messages and warnings on stderr.
     ///
     /// The final report (table, JSON, or CSV) is still printed to stdout.

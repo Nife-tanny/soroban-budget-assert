@@ -15,7 +15,7 @@ use cargo_metadata::{CrateType, MetadataCommand};
 use clap::Parser;
 use compare::{
     build_baseline, check_against_baseline, max_allowed as max_allowed_metric, parse_tolerance,
-    render_report_text, Baseline, Measurement, Tolerance,
+    render_report_markdown, render_report_text, Baseline, Measurement, RenderOptions, Tolerance,
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
@@ -1885,14 +1885,19 @@ fn main() -> anyhow::Result<()> {
                 default_tolerance,
                 &tolerance_overrides,
             );
+            let render_opts = RenderOptions {
+                hide_unchanged: args.hide_unchanged,
+            };
             if args.json {
                 let json = render_check_report_json(&report, default_tolerance);
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json).context("Failed to serialize JSON")?
                 );
+            } else if args.markdown {
+                print!("{}", render_report_markdown(&report, render_opts));
             } else {
-                print!("{}", render_report_text(&report));
+                print!("{}", render_report_text(&report, render_opts));
             }
             if report.has_regressions() {
                 std::process::exit(1);
@@ -2624,6 +2629,8 @@ mod tests {
             record_baseline: None,
             check_baseline: None,
             tolerance: None,
+            markdown: false,
+            hide_unchanged: false,
             quiet: false,
             validate: false,
             record: None,
@@ -2659,6 +2666,8 @@ mod tests {
             record_baseline: Some("budget-baseline.toml".to_string()),
             check_baseline: None,
             tolerance: None,
+            markdown: false,
+            hide_unchanged: false,
             quiet: false,
             validate: false,
             record: None,
@@ -2694,6 +2703,8 @@ mod tests {
             record_baseline: None,
             check_baseline: Some("custom.toml".to_string()),
             tolerance: None,
+            markdown: false,
+            hide_unchanged: false,
             quiet: false,
             validate: false,
             record: None,
@@ -2732,6 +2743,8 @@ mod tests {
             record_baseline: None,
             check_baseline: None,
             tolerance: None,
+            markdown: false,
+            hide_unchanged: false,
             quiet: false,
             validate: false,
             record: None,
