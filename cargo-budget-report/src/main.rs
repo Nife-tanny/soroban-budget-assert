@@ -30,8 +30,8 @@ use tabled::settings::object::Rows;
 use tabled::settings::Color as TabledColor;
 use tabled::settings::Modify;
 use tabled::{Table, Tabled};
-use wasmparser::Parser as WasmParser;
 
+mod contract_exports;
 mod derive;
 mod error;
 mod network_guard;
@@ -1512,6 +1512,16 @@ fn main() -> anyhow::Result<()> {
             .iter()
             .any(|target| target.crate_types.contains(&CrateType::CDyLib));
         if !is_cdylib {
+            // A crate that pulls in soroban-sdk as a normal dependency but
+            // is not a cdylib produces no WASM at all — the most common
+            // "why isn't my contract showing up" misconfiguration. Say so
+            // instead of skipping in silence.
+            let looks_like_contract = package.dependencies.iter().any(|dep| {
+                dep.name == "soroban-sdk" && dep.kind == cargo_metadata::DependencyKind::Normal
+            });
+            if looks_like_contract && !args.quiet {
+                eprintln!("{}", contract_exports::not_a_cdylib_message(&package.name));
+            }
             continue;
         }
 
@@ -1569,32 +1579,26 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        // Parse WASM exports
+        // Parse WASM exports and classify what came back. A cdylib that
+        // produces nothing simulatable has three distinct causes, each with
+        // its own message — see `contract_exports`.
         let wasm_bytes = std::fs::read(&wasm_path)?;
         let wasm_size: u32 = wasm_bytes.len().try_into().unwrap_or(u32::MAX);
-        let mut exported_fns: HashSet<String> = HashSet::new();
 
-        for payload in WasmParser::new(0).parse_all(&wasm_bytes) {
-            if let wasmparser::Payload::ExportSection(export_section) = payload? {
-                for export_item in export_section {
-                    let export_item = export_item?;
-                    if export_item.kind == wasmparser::ExternalKind::Func {
-                        let name = export_item.name.to_string();
-                        // Ignore internal and common exports
-                        if !name.starts_with('_') && name != "memory" {
-                            exported_fns.insert(name);
-                        }
-                    }
+        let exported_fns: HashSet<String> = match contract_exports::scan_wasm_exports(&wasm_bytes)?
+        {
+            contract_exports::ExportScan::Functions(fns) => fns.into_iter().collect(),
+            other => {
+                if let Some(diagnostic) = other.diagnostic(&package.name) {
+                    eprintln!("Error: {diagnostic}");
                 }
+                // A crate explicitly built as a cdylib that exports no
+                // contract entrypoint is a real misconfiguration: fail the
+                // run so CI does not treat it as "nothing to report".
+                has_errors = true;
+                continue;
             }
-        }
-
-        if exported_fns.is_empty() {
-            if !args.quiet {
-                eprintln!("No exported functions found in {}", package.name);
-            }
-            continue;
-        }
+        };
 
         let spinner = if args.quiet {
             None
