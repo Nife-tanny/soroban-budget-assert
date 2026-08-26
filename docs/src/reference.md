@@ -318,6 +318,52 @@ observed ratios, deviation, and all measurements.
   the measured work dominates.
 - Only CPU cost is checked.
 
+### Applying a budget attribute to an `impl` block
+
+`#[budget_cpu_lt]`, `#[budget_mem_lt]`, `#[budget_write_bytes_lt]`,
+`#[budget_read_bytes_lt]` and `#[budget_lt]` may be placed on an `impl` block.
+The limit then applies to **every** `fn` in the block:
+
+```rust
+struct Contract;
+
+#[budget_cpu_lt(1_000_000)]
+impl Contract {
+    fn deposit() {
+        let env = Env::default();
+        // ... asserted against 1_000_000 ...
+    }
+
+    fn withdraw() {
+        let env = Env::default();
+        // ... also asserted against 1_000_000 ...
+    }
+
+    // Per-method override: this method's own attribute wins; the block
+    // limit does not also apply.
+    #[budget_cpu_lt(4_000_000)]
+    fn rebalance() {
+        let env = Env::default();
+    }
+}
+```
+
+Semantics:
+
+- **Every function is instrumented**, `pub` or not. "Twelve entry points, one
+  ceiling" is the motivating case, and a thirteenth added later is asserted
+  automatically rather than shipping unbudgeted.
+- **A method with its own `#[budget_*]` attribute is governed by that**, not the
+  block limit — it is never asserted twice. This is also the opt-out: a helper
+  that should not be budgeted can carry `#[budget_cpu_lt(env = "UNSET")]`, whose
+  unset-env limit resolves to "no limit".
+- **A failure names the method** — the panic message carries `` [fn `name`] ``.
+- Every method must have a local `env` in scope, exactly as for the
+  single-function form. A pure helper with no `env` belongs outside the block.
+- `#[budget_scaling]` is **not** supported on `impl` blocks (it rewrites a
+  function into a `#[test]`), and neither are modules or traits — those still
+  fail with a compile error.
+
 ### Requirements and caveats
 
 {% hint style="warning" %}
