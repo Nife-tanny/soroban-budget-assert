@@ -22,10 +22,6 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn mock_workspace_fixture() -> PathBuf {
-    manifest_dir().join("tests/fixtures/mock_workspace")
-}
-
 fn fake_bin_dir() -> PathBuf {
     manifest_dir().join("tests/fixtures/fake_bin")
 }
@@ -52,8 +48,19 @@ fn copy_dir_all(src: &Path, dst: &Path) {
 
 /// Copies the mock workspace fixture into a fresh tempdir and returns it.
 fn setup_mock_workspace() -> tempfile::TempDir {
+    setup_fixture_workspace("mock_workspace")
+}
+
+/// Copies the named fixture workspace under `tests/fixtures/` into a fresh
+/// tempdir. Used for fixtures other than the default mock workspace (e.g.
+/// `no_exports_workspace`, whose crates deliberately produce nothing
+/// simulatable).
+fn setup_fixture_workspace(name: &str) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("failed to create tempdir");
-    copy_dir_all(&mock_workspace_fixture(), tmp.path());
+    copy_dir_all(
+        &manifest_dir().join("tests/fixtures").join(name),
+        tmp.path(),
+    );
     tmp
 }
 
@@ -726,4 +733,41 @@ fn testnet_is_unaffected_by_the_guard() {
         .assert();
 
     assert.success().stdout(contains("WORKSPACE BUDGET REPORT"));
+}
+
+#[test]
+fn contract_that_exports_nothing_reports_the_specific_cause() {
+    // The fixture workspace has one crate per failure mode; the fixture wasm
+    // is built here rather than checked in.
+    let workspace = setup_fixture_workspace("no_exports_workspace");
+
+    let assert = budget_report_cmd(workspace.path())
+        .args(["budget-report", "--network", "local", "--source", "alice"])
+        .assert();
+
+    let output = assert.failure().get_output().clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Cause 1: a soroban-sdk crate that is not a cdylib.
+    assert!(
+        stderr.contains("helper-only") && stderr.contains("cdylib"),
+        "names the non-cdylib crate and what to change: {stderr}"
+    );
+    // Cause 2: a cdylib with no function exports.
+    assert!(
+        stderr.contains("no-exports") && stderr.contains("no function exports"),
+        "distinguishes 'no exports at all': {stderr}"
+    );
+    // Cause 3: a cdylib exporting only toolchain symbols, and it lists them.
+    assert!(
+        stderr.contains("runtime-only")
+            && stderr.contains("calling convention")
+            && stderr.contains("_start"),
+        "distinguishes 'exports present, none simulatable' and lists what was found: {stderr}"
+    );
+    // The vague pre-existing message is gone.
+    assert!(
+        !stderr.contains("No exported functions found in"),
+        "the old undifferentiated message should not appear: {stderr}"
+    );
 }
