@@ -1,6 +1,9 @@
 use crate::cli::{BudgetReportArgs, CargoCli, ColorChoice};
 use crate::derive::{DerivationConfig, Margin};
-use crate::error::{Error, Result, SimulationFailure, SimulationOutcome};
+use crate::error::{
+    Error, Result, SimulationFailure, SimulationOutcome, EXIT_BUDGET_EXCEEDED,
+    EXIT_NETWORK_FAILURE, EXIT_REGRESSION, EXIT_SUCCESS,
+};
 use anyhow::Context;
 mod arg_spec;
 mod cli;
@@ -263,7 +266,8 @@ pub(crate) struct BudgetToml {
     network: Option<String>,
     source: Option<String>,
     /// Global default tolerance, used unless overridden per function or by `--tolerance`.
-    #[serde(default)]
+    /// Accepts a fraction (`0.05`) or a percentage string (`"5%"`).
+    #[serde(default, deserialize_with = "deserialize_tolerance")]
     tolerance: Option<f64>,
     #[serde(default)]
     margin: Option<MarginToml>,
@@ -395,8 +399,9 @@ pub(crate) struct FunctionConfig {
     read_limit: Option<u64>,
     #[serde(default)]
     write_limit: Option<u64>,
-    /// Optional per-function override for the regression tolerance.
-    #[serde(default)]
+    /// Optional per-function override for the regression tolerance. Accepts a
+    /// fraction (`0.05`) or a percentage string (`"5%"`).
+    #[serde(default, deserialize_with = "deserialize_tolerance")]
     tolerance: Option<f64>,
 }
 
@@ -890,6 +895,51 @@ pub(crate) fn resolve_tolerance(
     Ok(Tolerance::default())
 }
 
+/// Decide the exit code from the run's boolean outcomes.
+///
+/// Precedence (most actionable first): regression beyond tolerance beats a
+/// budget-exceeded result, which beats a network/infrastructure fault. A
+/// regression is a real signal that should block a PR, whereas a network
+/// fault is safe to retry, so surfacing the regression wins when both occur.
+fn classify_outcome(has_regressions: bool, budget_exceeded: bool, network_failure: bool) -> i32 {
+    if has_regressions {
+        EXIT_REGRESSION
+    } else if budget_exceeded {
+        EXIT_BUDGET_EXCEEDED
+    } else if network_failure {
+        EXIT_NETWORK_FAILURE
+    } else {
+        EXIT_SUCCESS
+    }
+}
+
+/// Deserialize a tolerance value that may be written either as a plain number
+/// (`tolerance = 0.05`) or as a string (`tolerance = "5%"`), matching the
+/// syntax accepted by [`compare::parse_tolerance`]. A missing field yields
+/// `None` (fall back to the global/default tolerance); an invalid value
+/// produces a deserialization error, which surfaces as a configuration error.
+fn deserialize_tolerance<'de, D>(deserializer: D) -> std::result::Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Num(f64),
+        Str(String),
+    }
+    match Option::<Raw>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Raw::Num(n)) => Ok(Some(n)),
+        Some(Raw::Str(s)) => {
+            let t = compare::parse_tolerance(&s).map_err(serde::de::Error::custom)?;
+            Ok(Some(t.value))
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 struct CheckReportJson<'r> {
     has_regressions: bool,
@@ -897,6 +947,10 @@ struct CheckReportJson<'r> {
     default_tolerance: f64,
     regressions: Vec<RegressionJson<'r>>,
     improvements: Vec<ImprovementJson<'r>>,
+    /// Measurements that passed (within tolerance). Included so a passing
+    /// result is interpretable: each entry records the tolerance that was
+    /// applied to it (per-function override, global, or default).
+    passes: Vec<PassJson<'r>>,
     new_entries: Vec<NewEntryJson<'r>>,
     stale_entries: Vec<StaleEntryJson<'r>>,
 }
@@ -923,6 +977,17 @@ struct ImprovementJson<'r> {
 }
 
 #[derive(serde::Serialize)]
+struct PassJson<'r> {
+    package: &'r str,
+    function: &'r str,
+    metric: &'r str,
+    baseline: u64,
+    current: u64,
+    tolerance: f64,
+    max_allowed: u64,
+}
+
+#[derive(serde::Serialize)]
 struct NewEntryJson<'r> {
     package: &'r str,
     function: &'r str,
@@ -940,6 +1005,7 @@ fn render_check_report_json(
 ) -> serde_json::Value {
     let mut regressions = Vec::new();
     let mut improvements = Vec::new();
+    let mut passes = Vec::new();
     for func in &report.compared {
         for m in &func.metrics {
             match m.verdict {
@@ -964,7 +1030,17 @@ fn render_check_report_json(
                         tolerance: m.tolerance.value,
                     });
                 }
-                compare::Verdict::Pass => {}
+                compare::Verdict::Pass => {
+                    passes.push(PassJson {
+                        package: &func.package,
+                        function: &func.function,
+                        metric: m.metric.label(),
+                        baseline: m.baseline,
+                        current: m.current,
+                        tolerance: m.tolerance.value,
+                        max_allowed: max_allowed_metric(m.baseline, m.tolerance.value),
+                    });
+                }
             }
         }
     }
@@ -990,6 +1066,7 @@ fn render_check_report_json(
         default_tolerance: default_tolerance.value,
         regressions,
         improvements,
+        passes,
         new_entries,
         stale_entries,
     };
@@ -1375,13 +1452,30 @@ impl transport::Transport for TransportKind {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
+    let code = match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            err.exit_code()
+        }
+    };
+    std::process::exit(code);
+}
+
+/// Run the report and return the exit code CI should observe.
+///
+/// Distinct outcomes get distinct codes (see `docs/src/ci_cd_integration.md`):
+/// success, configuration error, budget exceeded, regression beyond
+/// tolerance, and network/infrastructure failure. Any unexpected error
+/// bubbles up as `Err` and is mapped to its variant's code by the caller.
+fn run() -> Result<i32> {
     let CargoCli::BudgetReport(args) = CargoCli::parse();
 
     // ── --init: scaffold a template and exit ──────────────────────────
     if args.init {
         scaffold_init(args.force, args.quiet)?;
-        return Ok(());
+        return Ok(EXIT_SUCCESS);
     }
 
     // ── --derive-limits: read Tier B JSON → write env file, no simulation ──
@@ -1392,7 +1486,7 @@ fn main() -> anyhow::Result<()> {
     if matches!(Mode::from_args(&args), Mode::Derive(..)) {
         let toml_config = load_budget_toml("budget.toml")?;
         run_derive_mode(&args, &toml_config)?;
-        return Ok(());
+        return Ok(EXIT_SUCCESS);
     }
 
     // ── Preflight environment checks ──────────────────────────────────
@@ -1445,7 +1539,9 @@ fn main() -> anyhow::Result<()> {
             network,
             source,
             retry_config,
-        );
+        )
+        .map_err(Error::from)
+        .map(|()| EXIT_SUCCESS);
     }
 
     let network = args
@@ -1525,7 +1621,7 @@ fn main() -> anyhow::Result<()> {
             .context("failed to build package")?;
 
         if !build_status.success() {
-            anyhow::bail!("Failed to build {}", package.name);
+            return Err(Error::Message(format!("Failed to build {}", package.name)));
         }
 
         // Locate the cdylib target to derive the correct WASM filename.
@@ -1805,9 +1901,13 @@ fn main() -> anyhow::Result<()> {
             eprintln!("No successful simulations to report.");
         }
         if has_errors || (args.check && checks_failed) || validation_failed {
-            std::process::exit(1);
+            return Ok(classify_outcome(
+                false,
+                args.check && checks_failed,
+                has_errors || validation_failed,
+            ));
         }
-        return Ok(());
+        return Ok(EXIT_SUCCESS);
     }
 
     // Per-function tolerance overrides from `budget.toml` (top-level plus
@@ -1842,7 +1942,7 @@ fn main() -> anyhow::Result<()> {
                 .save(&path)
                 .with_context(|| format!("failed to save baseline to {}", path.display()))?;
             eprintln!("Recorded baseline to {}", path.display());
-            return Ok(());
+            return Ok(EXIT_SUCCESS);
         }
         Mode::Check(path) => {
             let baseline = Baseline::load(&path)
@@ -1863,9 +1963,9 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", render_report_text(&report));
             }
             if report.has_regressions() {
-                std::process::exit(1);
+                return Ok(EXIT_REGRESSION);
             }
-            return Ok(());
+            return Ok(EXIT_SUCCESS);
         }
         Mode::Derive(_, _) => unreachable!("derive mode returns early before this point"),
         Mode::Report => {} // Fall through to the legacy rendering below.
@@ -1985,11 +2085,15 @@ fn main() -> anyhow::Result<()> {
         }
     }
     // PR #195: `--check` exits non-zero when any limit was breached so CI can
-    // gate on the result. Mirrors the empty-measurements branch above.
-    if (args.check && checks_failed) || validation_failed {
-        std::process::exit(1);
-    }
-    Ok(())
+    // gate on the result. Network/infrastructure failures (simulations that
+    // never produced metrics, `--validate` decode failures) also exit
+    // non-zero with their own code so a CI job can retry instead of treating
+    // them as a real budget/regression failure.
+    Ok(classify_outcome(
+        false,
+        args.check && checks_failed,
+        has_errors || validation_failed,
+    ))
 }
 
 mod config;
@@ -2364,6 +2468,97 @@ mod tests {
             .get("do_expensive_work")
             .expect("function present");
         assert_eq!(func.tolerance, Some(0.05));
+    }
+
+    #[test]
+    fn budget_toml_parses_percentage_string_tolerance() {
+        let path = unique_test_path();
+        fs::write(
+            &path,
+            "tolerance = \"10%\"\n\
+             [functions.do_expensive_work]\ntolerance = \"5%\"\n",
+        )
+        .expect("failed to write budget.toml");
+        let config = load_budget_toml(&path).expect("parse should succeed");
+        assert!((config.tolerance.unwrap() - 0.10).abs() < f64::EPSILON);
+        let func = config
+            .functions
+            .get("do_expensive_work")
+            .expect("function present");
+        assert!((func.tolerance.unwrap() - 0.05).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn budget_toml_rejects_malformed_per_function_tolerance() {
+        let path = unique_test_path();
+        fs::write(
+            &path,
+            "[functions.do_expensive_work]\ntolerance = \"not-a-number\"\n",
+        )
+        .expect("failed to write budget.toml");
+        let err = load_budget_toml(&path).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("TOML error"),
+            "expected a configuration error, got: {text}"
+        );
+        assert!(
+            text.contains("tolerance must be a number"),
+            "error should name the malformed tolerance, got: {text}"
+        );
+    }
+
+    #[test]
+    fn json_report_includes_passes_with_applied_tolerance() {
+        // A measurement that passes within its per-function override must
+        // appear in the JSON `passes` array, carrying the tolerance that was
+        // applied, so a passing result is interpretable.
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert(
+            compare::function_key("amm-pool-contract", "do_expensive_work"),
+            compare::BaselineEntry::from_measurement(compare::Measurement {
+                cpu_instructions: 1000,
+                read_bytes: 200,
+                write_bytes: 300,
+            }),
+        );
+        let baseline = compare::Baseline { entries };
+
+        let mut pkg = std::collections::BTreeMap::new();
+        pkg.insert(
+            "do_expensive_work".to_string(),
+            compare::Measurement {
+                cpu_instructions: 1050,
+                read_bytes: 200,
+                write_bytes: 300,
+            },
+        );
+        let mut current = std::collections::BTreeMap::new();
+        current.insert("amm-pool-contract".to_string(), pkg);
+
+        // Global tolerance 0% would regress on 1050 vs 1000; the per-function
+        // 10% override lets it pass, and that override is what must be reported.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("do_expensive_work".to_string(), Tolerance::new(0.10));
+
+        let report =
+            compare::check_against_baseline(&baseline, &current, Tolerance::new(0.0), &overrides);
+        let json = render_check_report_json(&report, Tolerance::new(0.0));
+        let passes = json
+            .get("passes")
+            .expect("`passes` key present")
+            .as_array()
+            .expect("`passes` is an array");
+        assert!(!passes.is_empty(), "expected at least one passing entry");
+        let tolerance = passes[0]
+            .get("tolerance")
+            .expect("pass entry has tolerance")
+            .as_f64()
+            .expect("tolerance is a number");
+        assert!(
+            (tolerance - 0.10).abs() < f64::EPSILON,
+            "got tolerance {tolerance}"
+        );
     }
 
     // --- Tolerance resolution ----------------------------------------------
@@ -3197,7 +3392,7 @@ write_limit = 1000
         assert_eq!(csv, "package,function,metric,value\n");
     }
 
-    #[test]
+#[test]
     fn build_utc_timestamp_success() {
         let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000);
         let ts = build_utc_timestamp(now).expect("should return timestamp");
@@ -3210,5 +3405,30 @@ write_limit = 1000
         let err = build_utc_timestamp(before_epoch).unwrap_err();
         let err_msg = err.to_string();
         assert!(err_msg.contains("system time error"), "got {}", err_msg);
+    }
+
+    // ── Exit-code classification (#406) ──────────────────────────────────
+
+    #[test]
+    fn classify_outcome_success_when_nothing_failed() {
+        assert_eq!(classify_outcome(false, false, false), EXIT_SUCCESS);
+    }
+
+    #[test]
+    fn classify_outcome_regression_takes_precedence() {
+        // A regression is the strongest signal; it wins even when a budget
+        // limit also failed and the network was flaky.
+        assert_eq!(classify_outcome(true, true, true), EXIT_REGRESSION);
+    }
+
+    #[test]
+    fn classify_outcome_budget_before_network() {
+        assert_eq!(classify_outcome(false, true, true), EXIT_BUDGET_EXCEEDED);
+        assert_eq!(classify_outcome(false, true, false), EXIT_BUDGET_EXCEEDED);
+    }
+
+    #[test]
+    fn classify_outcome_network_only() {
+        assert_eq!(classify_outcome(false, false, true), EXIT_NETWORK_FAILURE);
     }
 }

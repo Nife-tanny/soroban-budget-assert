@@ -1,3 +1,4 @@
+// @measure local  # discovered by scripts/regenerate-measurements.sh
 #![cfg(feature = "sdk20")]
 
 #[cfg(test)]

@@ -1192,7 +1192,7 @@ This is the complete reference for the `budget.toml` file. It was verified again
 |---|---|---|---|---|
 | `network` | string | no | none | Target network for deploy/simulate (`"testnet"`, `"futurenet"`, `"local"`, or a custom network from your Stellar CLI config). Falls back to `--network`; if neither is set the run aborts with `missing --network or budget.toml network field`. |
 | `source` | string | no | none | Stellar source identity used for deployment fees and as simulation source. Falls back to `--source`; if neither is set the run aborts. |
-| `tolerance` | number (fraction) | no | `0.10` | Default regression tolerance for `--check-baseline`. Overridable per function (see below) and by `--tolerance`. |
+| `tolerance` | number (fraction) **or** percentage string (`"10%"`) | no | `0.10` | Default regression tolerance for `--check-baseline`. Overridable per function (see below) and by `--tolerance`. Resolved as: per-function `tolerance` → `--tolerance` flag → this key → `0.10`. |
 | `[margin]` | table | no | none | Per-metric margin multipliers consumed only by `--derive-limits`. See [below](#margin-deriving-tier-a-limits). |
 | `[scenarios.<name>]` | table of tables | no | none | Function-to-scenario mapping consumed only by `--derive-limits`. See [below](#scenariosnamemapping-functions-to-derived-scenario-limits). |
 | `[functions.<name>]` | table of tables | no | none | Per-function configuration. See [below](#functionsnameper-function-configuration). |
@@ -1227,12 +1227,14 @@ The section key `<name>` must match the **exported WASM function name exactly** 
 | `cpu_limit` | integer (u64) | no | none | Inclusive upper bound on the measured `CPU Instructions` metric in `--check` mode. |
 | `read_limit` | integer (u64) | no | none | Inclusive upper bound on `Read Bytes`. |
 | `write_limit` | integer (u64) | no | none | Inclusive upper bound on `Write Bytes`. |
-| `tolerance` | number (fraction) | no | global tolerance | Per-function regression-tolerance override applied during `--check-baseline`. Takes precedence over `--tolerance`. |
+| `tolerance` | number (fraction) **or** percentage string (`"5%"`) | no | global tolerance | Per-function regression-tolerance override applied during `--check-baseline`. Takes precedence over `--tolerance`. |
 
 - A missing `*_limit` field means that metric is **reported but not enforced**.
 - Limits are inclusive: a measurement equal to the limit passes.
 - There is deliberately no limit field for `WASM Bytes` — binary size is reported but can never be enforced through this file.
 - **Unknown keys inside a `[functions.*]` block produce a parse error** (e.g. a typo like `cpu_lmit` fails the run instead of silently doing nothing).
+- A malformed `tolerance` value (neither a number nor a percentage string, e.g. `tolerance = "abc"`) is a configuration error that fails the run before any simulation starts.
+- The tolerance **actually applied** to each measurement is shown in the `--check-baseline` report: the text table prints a `tolerance` column, and the JSON output carries a `tolerance` field on every `passes`, `improvements`, and `regressions` entry. This is what makes a passing result interpretable — you can see whether a function was judged under its own override, the global value, or the default.
 - Under `--check`, a configured function whose *simulation fails* counts as a check failure even when none of its limits are set, so a broken invocation cannot masquerade as a pass.
 
 #### Typed argument specs

@@ -1,3 +1,4 @@
+// @measure local  # discovered by scripts/regenerate-measurements.sh
 #![cfg(test)]
 
 use std::sync::{Mutex, PoisonError};
