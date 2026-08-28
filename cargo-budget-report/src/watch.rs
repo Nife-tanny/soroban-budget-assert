@@ -372,9 +372,7 @@ pub(crate) fn watch_loop(
                 }
             }
         } else if args.json {
-            let json = serde_json::to_string_pretty(&result.reports)
-                .context("Failed to serialize report to JSON")?;
-            eprintln!("{json}");
+            eprintln!("{}", crate::json_output::render_json(&result.reports));
         }
 
         if result.has_errors {
@@ -442,7 +440,7 @@ fn run_measurement_pass(
                 "-p",
                 package.name.as_str(),
                 "--target",
-                "wasm32-unknown-unknown",
+                "wasm32v1-none",
                 "--profile",
                 build_profile,
             ])
@@ -470,7 +468,7 @@ fn run_measurement_pass(
         };
         let wasm_path = metadata
             .target_directory
-            .join("wasm32-unknown-unknown")
+            .join("wasm32v1-none")
             .join(build_profile)
             .join(format!("{}.wasm", wasm_name));
 
@@ -528,7 +526,10 @@ fn run_measurement_pass(
             }
 
             let func_config = toml_config.functions.get(&function);
-            let func_args = func_config.map(|cfg| cfg.args.clone()).unwrap_or_default();
+            let func_args = match func_config {
+                Some(cfg) => crate::arg_spec::render_args(&cfg.args, &function)?,
+                None => Vec::new(),
+            };
 
             match crate::simulate_function(
                 &mut transport,

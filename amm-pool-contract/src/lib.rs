@@ -1,4 +1,9 @@
 #![no_std]
+// soroban-sdk 27 deprecates `Events::publish` in favour of the `#[contractevent]`
+// macro. This is a fixture/benchmark contract and the event payloads are not
+// asserted on anywhere; migrating the event model is out of scope for the SDK
+// bump (issue #382). Suppress the deprecation rather than half-migrate it.
+#![allow(deprecated)]
 use soroban_sdk::{
     contract, contractimpl, symbol_short, token, vec, Address, Bytes, BytesN, Env, Symbol, Val, Vec,
 };
@@ -271,6 +276,20 @@ impl ConstantProductPool {
     /// isolates `require_auth`.
     pub fn extend_instance_ttl(env: Env, threshold: u32, extend_to: u32) {
         env.storage().instance().extend_ttl(threshold, extend_to);
+    }
+
+    /// Extends the TTL of a single persistent storage entry so it is not
+    /// evicted from the ledger before `extend_to` ledgers from now,
+    /// provided the current TTL is below `threshold` ledgers.
+    ///
+    /// Writes a dummy value on first call so the key exists, then extends.
+    /// Isolated for measurement — same pattern as `extend_instance_ttl`.
+    pub fn extend_persistent_ttl(env: Env, threshold: u32, extend_to: u32) {
+        let key = symbol_short!("pttl");
+        env.storage().persistent().set(&key, &0i128);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, threshold, extend_to);
     }
 
     pub fn do_expensive_work(env: Env, n: u32) -> u32 {
