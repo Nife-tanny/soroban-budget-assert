@@ -30,6 +30,18 @@ pub struct BudgetReportArgs {
     #[arg(long)]
     pub source: Option<String>,
 
+    /// Permit the run to build and deploy against a non-disposable network.
+    ///
+    /// `cargo budget-report` deploys a contract and simulates calls against
+    /// it. Against testnet, futurenet, or a local network that is free and
+    /// throwaway. Against Stellar Mainnet it funds a source account and
+    /// pushes a contract using real funds. Without this flag the run stops
+    /// before building anything when the resolved network is Mainnet — or
+    /// when it cannot be recognised as disposable, which is treated the same
+    /// way rather than assumed safe.
+    #[arg(long, default_value_t = false)]
+    pub allow_mainnet: bool,
+
     #[arg(long, default_value_t = false, conflicts_with = "csv")]
     pub json: bool,
 
@@ -61,6 +73,25 @@ pub struct BudgetReportArgs {
     /// precedence over `tolerance` in `budget.toml`.
     #[arg(long)]
     pub tolerance: Option<String>,
+
+    /// Render the `--check-baseline` comparison as a GitHub-flavored
+    /// Markdown diff table instead of the plain-text one.
+    ///
+    /// Each row shows baseline, current, absolute change, and percentage
+    /// change; direction is an ASCII marker (not colour) so it survives CI
+    /// logs and step summaries, which is this format's main destination.
+    /// Only meaningful with `--check-baseline`; ignored otherwise. `--json`
+    /// wins if both are passed.
+    #[arg(long, default_value_t = false)]
+    pub markdown: bool,
+
+    /// Drop rows whose value is unchanged from the baseline in the
+    /// `--check-baseline` comparison.
+    ///
+    /// In the Markdown output the default instead collapses unchanged rows
+    /// into a `<details>` block; this flag omits them from both formats.
+    #[arg(long, default_value_t = false)]
+    pub hide_unchanged: bool,
 
     /// Suppress non-essential progress messages and warnings on stderr.
     ///
@@ -206,6 +237,44 @@ pub struct BudgetReportArgs {
     /// Refuses to start when stdout is not a terminal (CI guard).
     #[arg(long, default_value_t = false)]
     pub watch: bool,
+
+    /// Custom Soroban RPC endpoint to simulate against (#49).
+    ///
+    /// Overrides the built-in `testnet` / `futurenet` endpoints so a local
+    /// standalone RPC node (e.g. `http://localhost:8000/soroban/rpc` from a
+    /// Docker quickstart image) can be targeted to avoid public-network rate
+    /// limits or to exercise custom fee settings. `--network-passphrase` is
+    /// required whenever this is set.
+    #[arg(long, value_name = "URL", requires = "network_passphrase")]
+    pub rpc_url: Option<String>,
+
+    /// Network passphrase for `--rpc-url` (#49).
+    ///
+    /// Must match the passphrase the target RPC node was started with, e.g.
+    /// `"Standalone Network ; February 2017"` for a local quickstart node.
+    /// Only meaningful together with `--rpc-url`.
+    #[arg(long, value_name = "PASSPHRASE")]
+    pub network_passphrase: Option<String>,
+
+    /// Skip the on-disk deploy cache for this run and redeploy every
+    /// contract from scratch (#79).
+    ///
+    /// The cache (`.budget-cache.toml`) keys deployed contract ids on the
+    /// compiled wasm hash, the network, and the source account; any change
+    /// to those redeploys automatically. Use this flag to force a redeploy
+    /// even on an unchanged build (e.g. the cached contract was reclaimed by
+    /// ledger state). Deleting `.budget-cache.toml` has the same effect.
+    #[arg(long, default_value_t = false)]
+    pub no_deploy_cache: bool,
+
+    /// Secret seed (`S...`) of the source account, for native deploy/submit
+    /// without the `stellar` CLI key store (#123).
+    ///
+    /// Falls back to the `STELLAR_SECRET_KEY` environment variable. When
+    /// neither is set, deploy and invoke still go through the `stellar` CLI,
+    /// which must be installed (checked at preflight).
+    #[arg(long, value_name = "S...", env = "STELLAR_SECRET_KEY")]
+    pub source_secret: Option<String>,
 }
 
 /// Colour policy for the plain-text `--check` output.
@@ -243,6 +312,50 @@ mod tests {
     fn csv_alone_is_accepted() {
         let result = CargoCli::try_parse_from(["cargo", "budget-report", "--csv"]);
         assert!(result.is_ok(), "--csv alone should parse: {result:?}");
+    }
+
+    fn parse_args(argv: &[&str]) -> Result<BudgetReportArgs, clap::Error> {
+        let mut full = vec!["cargo", "budget-report"];
+        full.extend_from_slice(argv);
+        CargoCli::try_parse_from(full).map(|CargoCli::BudgetReport(a)| a)
+    }
+
+    #[test]
+    fn rpc_url_requires_network_passphrase() {
+        let err = parse_args(&["--rpc-url", "http://localhost:8000/soroban/rpc"])
+            .expect_err("--rpc-url without --network-passphrase should be rejected");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn rpc_url_with_passphrase_parses_and_overrides() {
+        let args = parse_args(&[
+            "--rpc-url",
+            "http://localhost:8000/soroban/rpc",
+            "--network-passphrase",
+            "Standalone Network ; February 2017",
+        ])
+        .expect("--rpc-url + --network-passphrase should parse");
+        assert_eq!(
+            args.rpc_url.as_deref(),
+            Some("http://localhost:8000/soroban/rpc")
+        );
+        assert_eq!(
+            args.network_passphrase.as_deref(),
+            Some("Standalone Network ; February 2017")
+        );
+    }
+
+    #[test]
+    fn no_deploy_cache_defaults_off_and_parses_on() {
+        assert!(!parse_args(&[]).unwrap().no_deploy_cache);
+        assert!(parse_args(&["--no-deploy-cache"]).unwrap().no_deploy_cache);
+    }
+
+    #[test]
+    fn source_secret_parses_from_flag() {
+        let args = parse_args(&["--source-secret", "SXXXXXXXX"]).unwrap();
+        assert_eq!(args.source_secret.as_deref(), Some("SXXXXXXXX"));
     }
 
     #[test]

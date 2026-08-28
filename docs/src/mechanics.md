@@ -25,7 +25,7 @@ lto = true
 These settings materially change the WASM being measured. `opt-level = "z"` and LTO optimize the binary shape, `codegen-units = 1` gives LLVM a broader optimization view, `panic = "abort"` removes unwinding paths, `strip = "symbols"` and `debug = 0` remove non-runtime payload, `debug-assertions = false` keeps release behavior, and `overflow-checks = true` preserves checked arithmetic. Cost figures from another release profile are not comparable: the measurements file records 901,816 local WASM CPU instructions / 756,678 testnet instructions for the size-optimized profile, versus 767,049 local / 832,006 testnet for Cargo's default release profile.
 
 {% hint style="info" %}
-The direction of the WASM gap is not stable — see the two build profiles compared in the [existing measurements](measurements.md#cpu-instructions), and the [SDK version calibration](measurements.md#sdk-version-calibration) which tracks how the gap shifts across soroban-sdk versions.
+The direction of the WASM gap is not stable — see the user guide on [Local vs. Network Cost Gap](cost_gap.md) for practical safety margin guidance, the two build profiles compared in the [existing measurements](measurements.md#cpu-instructions), and the [SDK version calibration](measurements.md#sdk-version-calibration) which tracks how the gap shifts across soroban-sdk versions.
 {% endhint %}
 
 Two conclusions drive the tool's design:
@@ -135,20 +135,20 @@ sequenceDiagram
 
 
 1. **Discover** — runs `cargo metadata` and selects every workspace package with a `cdylib` target (i.e., every Soroban contract).
-2. **Build** — compiles each contract with `cargo build --target wasm32-unknown-unknown --release`, using the workspace's `[profile.release]`.
+2. **Build** — compiles each contract with `cargo build --target wasm32v1-none --release`, using the workspace's `[profile.release]`.
 3. **Scan exports** — parses the `.wasm` binary with `wasmparser` and collects every exported function, skipping internals (names starting with `_`, and `memory`).
 4. **Deploy** — deploys the WASM to the configured network with `stellar contract deploy`.
 5. **Simulate** — for each exported function, builds an unsigned transaction (`stellar contract invoke --build-only`, with per-function arguments from `budget.toml`), then POSTs it to the Soroban RPC `simulateTransaction` endpoint.
-6. **Decode** — decodes the returned `SorobanTransactionData` XDR (`stellar xdr decode`) and extracts `resources.instructions`, `resources.disk_read_bytes`, and `resources.write_bytes`; on Soroban Protocol 22+, additionally reads `result.cost.memBytes` from the JSON-RPC `cost` block (see Memory Bytes below). On older protocol responses the `Memory Bytes` row is simply omitted (absence is not zero).
+6. **Decode** — decodes the returned `SorobanTransactionData` XDR (`stellar xdr decode`) and extracts `resources.instructions`, `resources.disk_read_bytes`, and `resources.write_bytes`; on Soroban Protocol 27+, additionally reads `result.cost.memBytes` from the JSON-RPC `cost` block (see Memory Bytes below). On older protocol responses the `Memory Bytes` row is simply omitted (absence is not zero).
 7. **Report** — aggregates every package/function pair into one table, or JSON with `--json`.
 
 Simulated numbers vary slightly with ledger state, but they are the network's own measurement of the exact WASM you deploy, not a local approximation.
 
 These three figures are resource *amounts*, and they are inputs to the non-refundable resource fee — not the fee itself and not a total cost. Rent, other refundable fees, transaction size, footprint entry counts, and the inclusion fee are outside what the tool measures. See [Measurement scope](reference.md#measurement-scope) for the full boundary and where to find the omitted pieces.
 
-### Memory Bytes (Protocol 22+)
+### Memory Bytes (Protocol 27+)
 
-The fourth reported row, `Memory Bytes`, does not come from the `SorobanTransactionData` XDR — Protocol 22 simulations return a separate `result.cost` JSON object alongside the XDR, and it carries per-metric human-readable `cpuInsns` and `memBytes` strings (stringified for `u64` precision over JSON). The CLI reads `result.cost.memBytes` from the JSON-RPC response in addition to the XDR fields, accepting both integer and string forms. This is the Source for the local-vs-network memory-bytes gap measurement series (issue #122).
+The fourth reported row, `Memory Bytes`, does not come from the `SorobanTransactionData` XDR — Protocol 27 simulations return a separate `result.cost` JSON object alongside the XDR, and it carries per-metric human-readable `cpuInsns` and `memBytes` strings (stringified for `u64` precision over JSON). The CLI reads `result.cost.memBytes` from the JSON-RPC response in addition to the XDR fields, accepting both integer and string forms. This is the Source for the local-vs-network memory-bytes gap measurement series (issue #122).
 
 ## How the tiers work together
 
@@ -158,14 +158,15 @@ Tier B tells you what a function really costs on the network. Tier A pins the *l
 
 ## ⚙️ Supported Versions & Compatibility
 
-* **Supported SDK Version**: `soroban-sdk` = `"22.0.11"` (specifically tested/resolved to `22.0.11` in `Cargo.lock`)
-* **Supported XDR Version**: `stellar-xdr` = `"22.1.0"` (used for decoding transaction simulation responses)
-* **Corresponding Stellar Protocol**: **Protocol 22**
+* **Supported SDK Version**: `soroban-sdk` = `"27.0.3"` (specifically tested/resolved to `27.0.6` in `Cargo.lock`)
+* **Supported XDR Version**: `stellar-xdr` = `"27.0.0"` (used for decoding transaction simulation responses)
+* **Corresponding Stellar Protocol**: **Protocol 27**
 
 ### Compatibility Matrix
 
 | SDK Version | Protocol Version | Status | Notes |
 | :--- | :--- | :--- | :--- |
 | **`< 22.0.0`** | `< 22` | **Untested** | Older protocols may use different transaction/resource schemas. |
-| **`22.0.x`** | `22` | **Supported** | Matches pinned manifest dependencies (`soroban-sdk` `22.0.11`, `stellar-xdr` `22.1.0`). |
-| **`>= 23.0.0`** | `>= 23` | **Untested** | Future protocol upgrades or XDR schema changes (e.g. key/field renames) may break parsing. |
+| **`22.0.x`** | `22` | **Untested** | Previously supported; superseded by SDK 27 workspace baseline. |
+| **`23.0.x` – `26.0.x`** | `23` – `26` | **Untested** | Not pinned in the workspace; may work but are untested. |
+| **`27.0.x`** | `27` | **Supported** | Matches pinned manifest dependencies (`soroban-sdk` `27.0.3`, `stellar-xdr` `27.0.0`). |
