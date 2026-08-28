@@ -8,10 +8,8 @@ use anyhow::Context;
 mod arg_spec;
 mod cli;
 mod compare;
-mod deploy_cache;
 mod fixture;
 mod html_output;
-mod json_output;
 mod live;
 mod record;
 mod replay;
@@ -24,8 +22,7 @@ use compare::{
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
-use std::io::IsTerminal;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -844,7 +841,7 @@ fn build_rpc_payload(b64_xdr: &str) -> serde_json::Value {
 /// field, or an undecodable response) is reported as
 /// `Ok(SimulationOutcome::Failed(..))` so the caller can move on to the next
 /// function instead of aborting the whole report.
-pub(crate) fn simulate_function(
+fn simulate_function(
     transport: &mut impl transport::Transport,
     contract_id: &str,
     source: &str,
@@ -1242,20 +1239,16 @@ fn run_preflight_checks(quiet: bool, source_secret: Option<&str>) -> Result<()> 
 }
 
 /// Deploys a contract WASM to the network through a [`transport::Transport`]
-/// and turns a failed deploy into an actionable user-facing error.
+/// and turns a failed deploy into the canonical user-facing error.
 ///
 /// Retrying is the live transport's job: [`live::LiveTransport`] wraps the
 /// `stellar contract deploy` call in the crate-wide retry machinery, which
 /// retries friendbot rate limits and other plausibly transient stderr (429,
 /// connection errors) up to `retry_config.max_attempts` times with
-/// exponential backoff and skips retrying deterministic failures.
-///
-/// When every attempt fails, this function classifies the last error into
-/// one of rate limiting / service outage / unreachable network / unfunded
-/// account (see [`deploy_diagnostics`]) and attaches the guidance for that
-/// class — rather than the old one-size-fits-all "ensure your source
-/// account is funded" line, which was only right for one of the four.
-pub(crate) fn deploy_contract_with_retry(
+/// exponential backoff and skips retrying deterministic failures. All this
+/// function does is report the outcome with the familiar "source account is
+/// funded" hint.
+fn deploy_contract_with_retry(
     transport: &mut impl transport::Transport,
     wasm_path: &Path,
     source: &str,
@@ -1265,15 +1258,10 @@ pub(crate) fn deploy_contract_with_retry(
 ) -> Result<String> {
     match transport.deploy_contract(wasm_path, source, network, package_name) {
         Ok(contract_id) => Ok(contract_id),
-        Err(err) => {
-            let last_error = err.to_string();
-            let class = deploy_diagnostics::classify(&last_error);
-            Err(Error::Message(format!(
-                "Failed to deploy {package_name} after {} attempts.\n{}\nLast error: {last_error}",
-                retry_config.max_attempts,
-                class.guidance(source, network),
-            )))
-        }
+        Err(err) => Err(Error::Message(format!(
+            "Failed to deploy {} after {} attempts. Ensure your source account is funded.\nLast error: {}",
+            package_name, retry_config.max_attempts, err
+        ))),
     }
 }
 
@@ -1681,38 +1669,10 @@ fn run() -> Result<i32> {
     let build_profile = args.profile.as_deref().unwrap_or("release");
 
     // All network interaction happens through the transport. Production runs
-    // use `LiveTransport` (which owns the retry policy); `--record` wraps it
-    // in a `RecordingTransport` that captures every response, and `--replay`
-    // serves responses back from a recorded fixture with no network at all.
-    let mut transport = if let Some(replay_path) = &args.replay {
-        TransportKind::Replay(replay::ReplayTransport::new(
-            fixture::FixtureFile::load(replay_path)
-                .with_context(|| format!("failed to load replay fixture {}", replay_path))?,
-        ))
-    } else if args.record.is_some() {
-        TransportKind::Recording(record::RecordingTransport::new(live::LiveTransport::new(
-            retry_config,
-            args.quiet,
-            net_override.clone(),
-        )))
-    } else {
-        TransportKind::Live(live::LiveTransport::new(
-            retry_config,
-            args.quiet,
-            net_override.clone(),
-        ))
-    };
-
-    // Deploy cache (#79): reuse a contract id across runs when the wasm
-    // hash, network, and source all match. `--replay` never deploys, so it
-    // has nothing to cache; `--no-deploy-cache` bypasses lookups but still
-    // records fresh deploys so a later cached run stays warm.
-    let mut deploy_cache = deploy_cache::DeployCache::load(std::path::Path::new("."));
-
-    // Union of every function exported by every contract in the workspace.
-    // Used at the end of the run (issue #399) to validate that every function
-    // configured in `budget.toml` actually exists.
-    let mut all_exported: HashSet<String> = HashSet::new();
+    // use `LiveTransport` (which owns the retry policy); `ReplayTransport`
+    // (fed by `RecordingTransport`) is available to tests and a follow-up
+    // CLI flag.
+    let mut transport = live::LiveTransport::new(retry_config, args.quiet);
 
     for package in metadata.packages {
         let is_cdylib = package
@@ -1824,31 +1784,14 @@ fn run() -> Result<i32> {
             Some(pb)
         };
 
-        let wasm_std_path = wasm_path.as_std_path();
-        let wasm_sha = deploy_cache::wasm_hash(wasm_std_path)?;
-        let cached_id = if args.no_deploy_cache {
-            None
-        } else {
-            deploy_cache
-                .get(&wasm_sha, &network, &source)
-                .map(str::to_string)
-        };
-
-        let (contract_id, from_cache) = match cached_id {
-            Some(id) => (id, true),
-            None => {
-                let id = deploy_contract_with_retry(
-                    &mut transport,
-                    wasm_std_path,
-                    &source,
-                    &network,
-                    &package.name,
-                    &retry_config,
-                )?;
-                deploy_cache.put(package.name.as_str(), &wasm_sha, &network, &source, &id);
-                (id, false)
-            }
-        };
+        let contract_id = deploy_contract_with_retry(
+            &mut transport,
+            wasm_path.as_std_path(),
+            &source,
+            &network,
+            &package.name,
+            &retry_config,
+        )?;
 
         if let Some(spinner) = spinner {
             spinner.finish_and_clear();
@@ -2177,7 +2120,9 @@ fn run() -> Result<i32> {
         }
         csv_writer.flush().context("Failed to flush CSV writer")?;
     } else if args.json {
-        println!("{}", json_output::render_json(&reports));
+        let json_output =
+            serde_json::to_string_pretty(&reports).context("Failed to serialize report to JSON")?;
+        println!("{}", json_output);
     } else if args.html {
         print!("{}", html_output::render_html(&reports, args.check));
     } else {
