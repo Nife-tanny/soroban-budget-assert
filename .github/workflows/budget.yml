@@ -24,6 +24,15 @@ jobs:
           toolchain: 1.91.0
           targets: wasm32v1-none wasm32-unknown-unknown
 
+      - name: Verify pinned toolchain is in effect
+        # rust-toolchain.toml takes precedence over any toolchain a previous
+        # step installed, so the compiler this job actually uses is whatever
+        # the file pins — and can silently differ from an install step above.
+        # `cargo --version` makes the effective compiler explicit in the log,
+        # proving the WASM this job measures was built with the pinned version
+        # (issue #489).
+        run: cargo --version
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -42,6 +51,14 @@ jobs:
 
       - name: Install System Dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libudev-dev
+
+      - name: Check toolchain pin matches workflows
+        # Fail if this or any other workflow that installs a Rust toolchain
+        # requests a version other than the one rust-toolchain.toml pins.
+        # The pin silently overrides earlier toolchain-install steps, so a
+        # divergent request means the WASM that CI measures is built by a
+        # compiler nobody asked for (issue #489).
+        run: scripts/check-toolchain-pin.sh
 
       # No Stellar CLI or testnet identity is installed here on purpose.
       # The Tier B step below is mocked, so nothing in this job reaches the
