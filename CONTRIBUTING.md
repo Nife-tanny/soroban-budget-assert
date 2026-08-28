@@ -202,3 +202,32 @@ This runs `cargo fmt --all -- --check` before every commit and blocks the
 commit if formatting is off. Fix with `cargo fmt --all` and commit again.
 The hook only checks formatting — clippy and tests are intentionally left
 to CI and the manual pre-PR checklist above, since they take longer to run.
+
+## Regenerating measurements
+
+The repository includes a discoverable script to regenerate all local measurement
+harnesses in a single command. This is useful for keeping `MEASUREMENTS.md`
+up‑to‑date after SDK upgrades or contract changes.
+
+```bash
+# Run all local measurement harnesses and capture their output.
+# Results are written to ./measurements-out/ for review.
+./scripts/regenerate-measurements.sh
+```
+
+The script:
+- Scans `*/tests/*.rs` for the marker comment `// @measure <mode>[:<feature>[:<test_name>]]`.
+- Runs harnesses marked as `local` (the default) and captures their stdout/stderr.
+- Lists any `testnet` harnesses that require a funded Soroban testnet identity – these are
+  skipped automatically; you can run them manually with the appropriate `stellar`
+  CLI commands as documented in the corresponding measurement sections.
+
+If you add a new measurement harness, include the marker comment at the top of the file.
+The format is `// @measure <mode>[:<feature>[:<test_name>]]`:
+
+- `// @measure local` – run automatically, no special features needed.
+- `// @measure local:sdk20` – run with `--features sdk20`.
+- `// @measure local:sdk22:calibrate_gap` – run with `--features sdk22`, only the named test.
+
+The script will discover it without any additional configuration.
+
