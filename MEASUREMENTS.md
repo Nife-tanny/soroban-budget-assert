@@ -8,6 +8,12 @@ Each measurement compares a local budget estimate against a network-verified fig
 
 The WASM is compiled with the profile specified in the **Build profile** column. The direction of the local-vs-network gap is not stable across profiles; the same contract built with Cargo's default release profile can produce a gap pointing in the opposite direction of one built with the size-optimization profile. Every figure includes its build context.
 
+## WASM target decision
+
+The project measures `wasm32v1-none`. This is the target installed by `rust-toolchain.toml`, used by the CI contract build, and used by the WASM-backed contract tests. `cargo-budget-report` uses the same target for its preflight check, Cargo build, artifact lookup, deployment, and simulation, so the report describes the binary produced by the documented build.
+
+Existing figures that do not record a target triple remain historical measurements and are intentionally not relabeled or regenerated silently. A clean two-target comparison for `amm-pool-contract` (`wasm32v1-none` versus `wasm32-unknown-unknown`) requires a Rust toolchain and funded testnet measurement environment; that comparison was not reproducible in the current development environment because neither Rust/Cargo nor a testnet identity was available. The first post-merge measurement should record both target triples and report WASM bytes, CPU instructions, read bytes, and write bytes side by side before updating any published baseline.
+
 For the storage-write measurement, the complete capture record is checked in at [`cargo-budget-report/fixtures/storage_write_benchmark.json`](cargo-budget-report/fixtures/storage_write_benchmark.json). It records the fixture arguments, local capture command, network capture method, both figures, and the calculated delta.
 
 ### Column reference
@@ -87,6 +93,7 @@ The network figure column requires a separate `cargo-budget-report` run on Sorob
 | `21.0.0` (≈`21.7.7`)^* | `21.7.7` | 2,653,878 | 1,658,163 | — | — | — | 2026-Q3 | `rustc 1.85.0` |
 | `22.0.0` | `22.0.11` | 2,654,615 | 1,658,706 | — | — | — | 2026-Q3 | `rustc 1.85.0` |
 | `27.0.3` | `27.0.6` | 803,497 | 1,441,165 | — | — | — | 2026-08 | `rustc 1.91.0` |
+| `28.0.0` | `28.0.x` | — | — | — | — | — | pending | `rustc <latest>` |
 
 > ^* SDK 21.0.0 is yanked; the lowest resolvable 21.x patch is 21.7.7.
 
@@ -100,13 +107,22 @@ The network figure column requires a separate `cargo-budget-report` run on Sorob
 
 ### How to regenerate
 
+The quickest way is to run the one-command regeneration script, which discovers all harnesses via `@measure` markers and runs the local ones:
+
+```bash
+./scripts/regenerate-measurements.sh --out ./measurements-out
+```
+
+For a specific SDK version, follow these steps:
+
 1. Pin the desired soroban-sdk version in `amm-pool-contract/Cargo.toml` (both `[dependencies]` and `[dev-dependencies]`).
 2. Run `cargo update -p soroban-sdk` to resolve.
 3. Build the WASM: `cargo build --target wasm32v1-none --release -p amm-pool-contract`.
 4. Collect local estimate: `cargo test -p amm-pool-contract calibrate_gap -- --nocapture`.
 5. For the network figure, deploy the WASM to testnet and run `cargo run --bin cargo-budget-report -- --network testnet` (see [Network simulation in mechanics.md](docs/src/mechanics.md#tier-b-network-simulation-cargo-budget-report)).
 6. Compute delta = (local − network) / network and add a row to the table above.
-A reusable script at `amm-pool-contract/calibrate_gap.ps1` automates steps 1–4 for a predefined list of SDK versions.
+
+A reusable PowerShell script at `amm-pool-contract/calibrate_gap.ps1` automates steps 1–4 for a predefined list of SDK versions.
 
 ### Cross-version comparison (local only)
 

@@ -36,3 +36,12 @@ panic = "abort"
 codegen-units = 1
 lto = true
 
+# The workspace release profile above targets small WASM contracts. The CLI
+# binary needs different trade-offs: faster startup, better diagnostics, and
+# a stack rather than abort-on-panic so backtraces work. (#500)
+[profile.release.package.cargo-budget-report]
+opt-level = 3
+panic = "unwind"
+lto = "thin"
+codegen-units = 16
+
