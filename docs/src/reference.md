@@ -745,6 +745,7 @@ This section is the **complete** flag reference: every `#[arg(...)]` field decla
 |---|---|---|---|
 | `--network <NETWORK>` | `network` | none — required from one source | Network to deploy and invoke against, e.g. `testnet` (passed straight through to the `stellar` CLI). CLI flag wins over the file; missing from both is a fatal error naming the field. **Does not** actually change what the simulate step targets — see [the discrepancy note](#--network-does-not-actually-route-the-simulate-step) below. |
 | `--source <SOURCE>` | `source` | none — required from one source | Funded Stellar identity used for deploy fees and as the simulation source. Same precedence as `--network`. |
+| `--allow-mainnet` | — | `false` | Permit the run to build and deploy against a non-disposable network. Without it, a run whose *resolved* network is Stellar Mainnet — or a network that cannot be recognised as disposable — stops before building anything. See [Mainnet guard](#mainnet-guard) below. |
 | `--json` | — | `false` | Emit the report as pretty-printed JSON instead of a table. Composes with `--check` (adds `limit`/`pass` per entry) and with `--record-baseline`/`--check-baseline` (see [Output-format precedence](#output-format-precedence-when-flags-combine)). |
 | `--csv` | — | `false` | Emit the report as CSV instead of a table. Header is `package,function,metric,value` normally, or `package,function,metric,value,limit,pass` under `--check`. Rows whose `value` never simulated are only included in `--check` mode (they carry `pass=false`); in the non-`--check` CSV they are omitted entirely, unlike the JSON/table output, which lists them. Takes priority over `--json`/`--html` if more than one is passed — see [below](#output-format-precedence-when-flags-combine). |
 | `--html` | — | `false` | Emit the report as a single self-contained HTML page — no external CSS, scripts, or fonts, so it renders from a `file://` URL and from a downloaded CI artifact. Rows mirror the JSON output; with `--check` each row also shows its limit and pass/fail status. |
@@ -758,6 +759,8 @@ This section is the **complete** flag reference: every `#[arg(...)]` field decla
 | `--record-baseline <PATH>` | — | none | Write a new resource-usage baseline snapshot to `PATH` (conventionally `budget-baseline.toml`) and exit, instead of printing a report. Requires an explicit path argument — `--record-baseline` with no value is a clap parse error, not an implicit default filename. See [Step 6 of the End-User Guide](user_guide.md#step-6-optional-catch-regressions-on-the-workspace-with-a-baseline). |
 | `--check-baseline <PATH>` | — | none | Check current measurements against the baseline snapshot at `PATH`, applying the configured regression tolerance (`--tolerance` / `tolerance` / per-function override). Exits non-zero on any regression beyond tolerance. Mutually exclusive in effect with `--record-baseline` — passing both resolves to whichever `Mode` is checked first in `Mode::from_args` (record wins); do not rely on that ordering, pass only one. |
 | `--tolerance <F>` | `tolerance` (top-level) and `[functions.<name>].tolerance` (per-function) | `0.10` | Regression tolerance for `--check-baseline`, as a fraction (`0.10`) or a percentage (`"10%"`). CLI flag overrides the file's top-level `tolerance` — **except** a function's own `[functions.<name>].tolerance`, which outranks even this flag for that function. See [Value precedence](#value-precedence). |
+| `--markdown` | — | `false` | With `--check-baseline`, render the comparison as a GitHub-flavored Markdown diff table instead of the plain-text one — baseline / current / absolute change / percentage change per metric, direction as an ASCII marker so it survives CI logs. Intended for `$GITHUB_STEP_SUMMARY`. Ignored without `--check-baseline`; `--json` wins if both are set. See [Baseline comparison output](#baseline-comparison-output). |
+| `--hide-unchanged` | — | `false` | With `--check-baseline`, drop metrics whose value is unchanged from the baseline. In Markdown, the default instead collapses them into a `<details>` block; this flag omits them from both formats. |
 | `--max-retry-attempts <N>` | `[retry].max_attempts` | `4` | Total attempts (including the first) for deploy, invoke-build, and simulate-RPC calls before giving up. `1` disables retry entirely; `0` is rejected with an error. See [`retry`: transient-failure retry policy](#retry-transient-failure-retry-policy) and the [testnet troubleshooting guide](testnet_troubleshooting.md) for what actually gets retried. |
 | `--retry-backoff-secs <SECS>` | `[retry].initial_backoff_secs` | `2` | Initial backoff before the first retry; doubles on each subsequent attempt (2 → 4 → 8 with the defaults). |
 | `--derive-limits <OUT>` | — | none | Derive local (Tier A) test limits from a Tier B JSON report and write them as `KEY=VALUE` pairs to `OUT`, then exit — no build/deploy/simulate happens in this mode. Reads the Tier B report from `--from` (or stdin). Requires either all four `--margin-*` flags or a complete `[margin]` block in `budget.toml`; see [`margin`: deriving Tier A limits](#margin-deriving-tier-a-limits). |
@@ -769,7 +772,7 @@ This section is the **complete** flag reference: every `#[arg(...)]` field decla
 | `--provenance-out <PATH>` | — | `<OUT>` with `.env` replaced by `.md` | Only meaningful with `--derive-limits`: where to write the Markdown provenance table documenting how each derived limit was computed. Defaults from `--derive-limits`'s own `OUT` path (e.g. `tier-a-limits.env` → `tier-a-limits.provenance.md`), so it rarely needs to be set explicitly. |
 | `--record <PATH>` | — | none | Record every transport response (deploy, invoke-build, simulate RPC) into a replayable fixture file at `PATH`. The run itself still talks to the network; the fixture lets a later `--replay` run reproduce the same report offline. Mutually exclusive with `--replay` (rejected by clap's `conflicts_with` at parse time, before any network call happens). |
 | `--replay <PATH>` | — | none | Replay a run from a fixture file written by `--record`. The whole report pipeline runs offline: no `stellar` CLI, no `curl`, no network access, and preflight checks for those tools are skipped entirely. Mutually exclusive with `--record`. |
-| `--watch` | — | `false` | Watch the workspace for file changes and re-measure on save. Refuses to start when stdout is not a terminal. |
+| `--watch` | — | `false` | Watch the workspace for source changes and re-measure affected packages on each save, printing a delta against the previous run. Refuses to start when stdout is not a terminal (CI guard). See [Step 7 of the End-User Guide](user_guide.md#step-7-optional-watch-mode-for-iterative-development). |
 
 ### Flags that interact
 
@@ -777,7 +780,7 @@ This section is the **complete** flag reference: every `#[arg(...)]` field decla
 - **`--csv` / `--json` / `--html` are mutually exclusive in effect, not by `conflicts_with`.** clap does not reject combining them; the renderer picks one output in a fixed priority order (`--csv` first, then `--json`, then `--html`, then the plain-text table). See [Output-format precedence](#output-format-precedence-when-flags-combine).
 - **`--record` and `--replay` *are* enforced as mutually exclusive** via clap's `conflicts_with`, so passing both is a parse-time error naming both flags — unlike the `--csv`/`--json`/`--html` case above.
 - **`--derive-limits` changes what every other network/build flag means.** In derive mode the tool never builds, deploys, or simulates anything; `--network`, `--source`, `--profile`, `--record`, `--replay`, and the retry flags are all irrelevant to that run. Only `--from`, `--margin-*`, and `--provenance-out` matter.
-- **`--record-baseline` / `--check-baseline` also short-circuit the legacy report path**, similarly to `--derive-limits`: `--json` still applies (it selects JSON vs. text rendering of the *baseline* report), but `--csv`, `--html`, and `--check` do not apply in these modes.
+- **`--record-baseline` / `--check-baseline` also short-circuit the legacy report path**, similarly to `--derive-limits`: `--json` still applies (it selects JSON vs. text rendering of the *baseline* report), and `--markdown` selects a Markdown diff table when `--json` is not set; `--csv`, `--html`, and `--check` do not apply in these modes. `--hide-unchanged` only affects the `--check-baseline` text/Markdown output.
 - **`--tolerance` is overridden, not overriding, in one specific case**: a function's own `[functions.<name>].tolerance` in `budget.toml` wins even over an explicit `--tolerance` flag. Every other file-vs-flag precedence in this tool goes the other way (flag wins). See [Value precedence](#value-precedence).
 - **`--max-retry-attempts` / `--retry-backoff-secs`** apply identically whether or not `--record-baseline`/`--check-baseline`/`--derive-limits` are active, because they gate the same underlying deploy/invoke/simulate calls those modes still make (except `--derive-limits`, which makes none).
 
@@ -830,6 +833,20 @@ So `cargo budget-report --csv --json` prints CSV only; `--json --html` prints JS
 ### `--color` does not actually force colour into a pipe
 
 `--color`'s own doc comment in `cli.rs` says `Always` will "always emit colour, even into pipes and files." That is not what the implementation does: `color_enabled_with` (the pure decision function backing `--color`, exhaustively unit-tested in `main.rs`) returns `false` whenever stdout is not a terminal or `NO_COLOR` is set, **before** it even looks at whether the choice was `Always`, `Auto`, or `Never`. A test in the same module asserts this directly: `--color always` piped to a file or another process produces no ANSI escapes. In practice `--always` and `--auto` currently behave identically; only `--never` is distinguishable from the other two. This looks like an intentional safety choice (never corrupt a file or a downstream parser with escape codes) that the help text's wording never caught up to — the behavior was not changed here, since changing flag behavior is out of scope for this page; only the discrepancy is reported.
+
+### Mainnet guard
+
+`cargo budget-report` deploys a throwaway contract and simulates calls against it. On testnet, futurenet, or a local network that is free and disposable. Pointed at **Stellar Mainnet**, the same pipeline funds a source account and pushes a contract using real funds — and nothing else in the tool treats Mainnet differently from any other network. A single misconfigured `network` value is all that stands between a testnet run and a real one.
+
+Before any package is built, funded, or deployed, the tool classifies the network it is *about* to use:
+
+- **testnet / futurenet / local** — disposable. The run proceeds.
+- **Mainnet** — the run stops with a message naming the network and pointing at `--allow-mainnet`.
+- **anything else** — treated as **unsafe**, refused the same way as Mainnet. Defaulting to permissive for an unrecognised network is the failure mode this guard exists to prevent.
+
+The check is on the resolved network passphrase, not the `--network` spelling. A well-known alias (`testnet`, `mainnet`, `futurenet`, `local`, `pubnet`, …) or a full network passphrase is classified directly; any other alias is resolved against the Stellar CLI's own `network/<name>.toml` config where present, so pointing a familiar-looking alias at Mainnet's passphrase does not get past the guard. It cannot be bypassed by expressing the same endpoint a different way — only by `--allow-mainnet`.
+
+`--allow-mainnet` is the sole opt-in. It permits both Mainnet and an unrecognised network. Supporting Mainnet reporting *properly* — real fee accounting, a dry-run mode, spend limits — is a separate, larger question and is out of scope for the guard.
 
 ### `--network` does not actually route the simulate step
 
@@ -1096,6 +1113,23 @@ There are no external CSS files, scripts, or fonts — the page works from a `fi
 cargo budget-report --html > budget-report.html
 ```
 
+### Baseline comparison output (`--check-baseline`)
+
+By default `--check-baseline` prints a plain-text table. `--markdown` switches it to a GitHub-flavored Markdown diff table for `$GITHUB_STEP_SUMMARY`, and `--json` (which wins over `--markdown`) emits the machine-readable form. All three carry the same data.
+
+Both table forms show, per metric: **baseline**, **current**, **absolute change** (signed), **percentage change** (signed; `n/a` when the baseline is zero), a **direction** marker (`^` up / `v` down / `=` flat — text, never colour, so it survives CI logs and step summaries), and a **status** that tells apart:
+
+- `improved` — current is below baseline;
+- `unchanged` — byte-for-byte identical;
+- `within tolerance` — increased but under `baseline * (1 + tolerance)`;
+- `BREACH (max N)` — over the ceiling; this is the only status that exits the run non-zero.
+
+Unchanged metrics: shown inline in text; collapsed into a `<details>` block in Markdown. `--hide-unchanged` omits them from both. New functions (present now, absent from the baseline) and stale entries (in the baseline, gone from the WASM) are listed after the table with a `--record-baseline` hint; neither affects the exit code.
+
+```bash
+cargo budget-report --check-baseline --markdown >> "$GITHUB_STEP_SUMMARY"
+```
+
 ## Measurement scope
 
 `cargo budget-report` reports **resource amounts from a simulation, not fees**. It reads three
@@ -1155,9 +1189,11 @@ answering "how much will my users pay".
 
 ## Failure behavior
 
+- A run whose resolved network is Mainnet (or is unrecognised) aborts immediately, before anything is built or deployed, unless `--allow-mainnet` was passed. See [Mainnet guard](#mainnet-guard).
 - Build failure, deploy failure, or an unparsable RPC response aborts the run with a contextual error (via `anyhow`) — e.g., a deploy failure reports that the source account may be unfunded.
 - A failed simulation of a single function prints a warning and skips it; the report still prints for the functions that succeeded.
-- If nothing simulates successfully, the CLI prints `No successful simulations to report.` and exits 0.
+- A crate built as a `cdylib` whose WASM exports no contract entrypoint aborts the run non-zero, with a message identifying which of the three causes applies (not a `cdylib`, no exports at all, or only toolchain symbols). See [A contract that exports nothing simulatable](testnet_troubleshooting.md#a-contract-that-exports-nothing-simulatable).
+- If nothing simulates successfully and no such misconfiguration was found, the CLI prints `No successful simulations to report.` and exits 0.
 - When `--check` is passed:
   - Any limit breach exits non-zero.
   - Any function declared in `budget.toml` whose simulation fails also exits non-zero (the warning is still printed), so a broken simulation cannot look like a silent pass.
