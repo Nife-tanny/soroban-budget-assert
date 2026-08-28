@@ -9,7 +9,7 @@
 #[cfg(test)]
 mod off_by_one_and_zero_length_tests {
     use crate::*;
-    use stellar_xdr::curr::{Limits, SorobanTransactionData, WriteXdr};
+    use stellar_xdr::{Limits, SorobanTransactionData, WriteXdr};
 
     // ── evaluate_check off-by-one tests ─────────────────────────────────
 
@@ -425,14 +425,17 @@ args = [""]
 
         let config = load_budget_toml(tmp.path()).expect("empty string arg should parse");
         let func = &config.functions["weird"];
-        assert_eq!(func.args, vec!["".to_string()]);
+        assert_eq!(
+            func.args,
+            vec![crate::arg_spec::ArgSpec::Raw(String::new())]
+        );
     }
 
     // ── build_invoke_args zero-length / boundary tests ─────────────────
 
     #[test]
     fn build_invoke_args_all_empty_strings() {
-        let args = build_invoke_args("", "", "", "", &[]);
+        let args = build_invoke_args("", "", "", "", &[], None);
         assert_eq!(args.len(), 11);
         assert_eq!(args[3], ""); // contract id
         assert_eq!(args[5], ""); // source
@@ -442,20 +445,20 @@ args = [""]
 
     #[test]
     fn build_invoke_args_empty_string_function_arg() {
-        let args = build_invoke_args("C", "alice", "testnet", "f", &["".into()]);
+        let args = build_invoke_args("C", "alice", "testnet", "f", &["".into()], None);
         assert_eq!(args.len(), 12);
         assert_eq!(args.last(), Some(&"".to_string()));
     }
 
     #[test]
     fn build_invoke_args_whitespace_only_function_arg() {
-        let args = build_invoke_args("C", "alice", "testnet", "f", &["   ".into()]);
+        let args = build_invoke_args("C", "alice", "testnet", "f", &["   ".into()], None);
         assert_eq!(args.last(), Some(&"   ".to_string()));
     }
 
     #[test]
     fn build_invoke_args_one_arg_boundary_length() {
-        let args = build_invoke_args("CID", "src", "net", "fn", &["x".into()]);
+        let args = build_invoke_args("CID", "src", "net", "fn", &["x".into()], None);
         // 11 base args + 1 function arg
         assert_eq!(args.len(), 12);
         assert_eq!(args[10], "fn");
@@ -535,16 +538,16 @@ args = [""]
     // ── extract_metrics zero-value / boundary tests ────────────────────
 
     fn make_tx_data(instructions: u32, read_bytes: u32, write_bytes: u32) -> String {
-        use stellar_xdr::curr::{ExtensionPoint, LedgerFootprint, VecM};
+        use stellar_xdr::{LedgerFootprint, SorobanTransactionDataExt, VecM};
         let tx_data = SorobanTransactionData {
-            ext: ExtensionPoint::V0,
-            resources: stellar_xdr::curr::SorobanResources {
+            ext: SorobanTransactionDataExt::V0,
+            resources: stellar_xdr::SorobanResources {
                 footprint: LedgerFootprint {
                     read_only: VecM::default(),
                     read_write: VecM::default(),
                 },
                 instructions,
-                read_bytes,
+                disk_read_bytes: read_bytes,
                 write_bytes,
             },
             resource_fee: 0,
