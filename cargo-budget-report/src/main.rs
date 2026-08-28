@@ -24,7 +24,7 @@ use compare::{
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,6 +42,7 @@ mod derive;
 mod error;
 mod json_output;
 mod network_guard;
+mod wasm_exports;
 mod watch;
 
 /// Maximum number of total deployment attempts (1 initial + 3 retries)
