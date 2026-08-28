@@ -24,7 +24,7 @@ First off, thank you for considering contributing to `soroban-budget-assert`!
 
 ### All platforms
 - Install Rust and the Soroban CLI. The repository includes a `rust-toolchain.toml` file, so `rustup` will automatically install and use the correct toolchain and target when you run cargo commands.
-- Run `cargo test` in the workspace root to run macro tests.
+- Run `cargo test --workspace` in the workspace root to run the full workspace test suite.
 - Run `cargo run -p cargo-budget-report -- budget-report` (or `cargo build`) to test the CLI locally.
 
 ## Documentation
@@ -77,13 +77,19 @@ brew install pkg-config dbus
 
 Add the WASM target:
 ```bash
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 ```
 
 Install the Stellar CLI:
 ```bash
 cargo install --locked stellar-cli
 ```
+
+> `cargo-budget-report` still shells out to the `stellar` CLI for contract
+> deploy and invoke-build (checked at preflight). Moving these to native RPC
+> calls is tracked in [#123](https://github.com/Tollcraft/soroban-budget-assert/issues/123);
+> `--source-secret` / `STELLAR_SECRET_KEY` is the signing-key mechanism that
+> change will use.
 
 ### Windows
 
@@ -97,7 +103,7 @@ Install prerequisites:
 Open **PowerShell** (or Git Bash) and run:
 ```powershell
 # Add the WASM target
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 
 # Install the Stellar CLI
 cargo install --locked stellar-cli
@@ -110,7 +116,7 @@ stellar keys generate alice --network testnet --fund
 
 Build the WASM contract and run tests:
 ```powershell
-cargo build -p amm-pool-contract --release --target wasm32-unknown-unknown
+cargo build -p amm-pool-contract --release --target wasm32v1-none
 cargo test --workspace
 ```
 
@@ -196,3 +202,32 @@ This runs `cargo fmt --all -- --check` before every commit and blocks the
 commit if formatting is off. Fix with `cargo fmt --all` and commit again.
 The hook only checks formatting — clippy and tests are intentionally left
 to CI and the manual pre-PR checklist above, since they take longer to run.
+
+## Regenerating measurements
+
+The repository includes a discoverable script to regenerate all local measurement
+harnesses in a single command. This is useful for keeping `MEASUREMENTS.md`
+up‑to‑date after SDK upgrades or contract changes.
+
+```bash
+# Run all local measurement harnesses and capture their output.
+# Results are written to ./measurements-out/ for review.
+./scripts/regenerate-measurements.sh
+```
+
+The script:
+- Scans `*/tests/*.rs` for the marker comment `// @measure <mode>[:<feature>[:<test_name>]]`.
+- Runs harnesses marked as `local` (the default) and captures their stdout/stderr.
+- Lists any `testnet` harnesses that require a funded Soroban testnet identity – these are
+  skipped automatically; you can run them manually with the appropriate `stellar`
+  CLI commands as documented in the corresponding measurement sections.
+
+If you add a new measurement harness, include the marker comment at the top of the file.
+The format is `// @measure <mode>[:<feature>[:<test_name>]]`:
+
+- `// @measure local` – run automatically, no special features needed.
+- `// @measure local:sdk20` – run with `--features sdk20`.
+- `// @measure local:sdk22:calibrate_gap` – run with `--features sdk22`, only the named test.
+
+The script will discover it without any additional configuration.
+

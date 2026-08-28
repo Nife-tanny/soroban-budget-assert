@@ -135,6 +135,7 @@ impl Transport for LiveTransport {
         _function: &str,
     ) -> Result<Value> {
         let rpc_payload = crate::build_rpc_payload(b64_xdr);
+        let endpoint = self.rpc_url().to_string();
 
         crate::run_with_retry(
             &self.retry_config,

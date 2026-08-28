@@ -27,13 +27,12 @@ fn test_cross_contract_wasm() {
 
     let wasm_path = "../target/wasm32v1-none/release/amm_pool_contract.wasm";
     let wasm = std::fs::read(wasm_path).expect("WASM file not found, did you run cargo build?");
-    #[allow(deprecated)]
-    let helper_address: Address = env.register_contract_wasm(None, wasm.as_slice());
-    #[allow(deprecated)]
-    let contract_address: Address = env.register_contract_wasm(None, wasm.as_slice());
+    let helper_address: Address = env.register(wasm.as_slice(), ());
+    let contract_address: Address = env.register(wasm.as_slice(), ());
     let client = ConstantProductPoolClient::new(&env, &contract_address);
 
     env.cost_estimate().budget().reset_unlimited();
+    env.cost_estimate().disable_resource_limits();
 
     client.do_cross_contract_work(&helper_address, &100);
 
@@ -56,22 +55,25 @@ fn test_cross_contract_wasm() {
 ///
 /// The ceiling was raised 300M -> 350M because the old one was stale: this
 /// measured 313,884,035 before the `noop` export existed and 314,972,209
-/// after, so it was already ~4.6% over. 350M restores roughly the headroom the
-/// original bound was chosen with.
+/// after, so it was already ~4.6% over. 350M restored roughly the headroom the
+/// original bound was chosen with. It moves again, 350M -> 420M, for the same
+/// reason: each iteration re-instantiates the module, so this figure tracks
+/// module *size*, and the crypto / token-transfer / call-depth fixtures
+/// (issues #414-#416) grew it 25,380 -> 29,906 bytes, taking the measurement
+/// 314,972,209 -> 364,044,978.
 #[test]
-#[budget_cpu_lt(350_000_000)]
+#[budget_cpu_lt(420_000_000)]
 fn test_cross_contract_macro_gated() {
     let env = Env::default();
 
     let wasm_path = "../target/wasm32v1-none/release/amm_pool_contract.wasm";
     let wasm = std::fs::read(wasm_path).expect("WASM file not found, did you run cargo build?");
-    #[allow(deprecated)]
-    let helper_address: Address = env.register_contract_wasm(None, wasm.as_slice());
-    #[allow(deprecated)]
-    let contract_address: Address = env.register_contract_wasm(None, wasm.as_slice());
+    let helper_address: Address = env.register(wasm.as_slice(), ());
+    let contract_address: Address = env.register(wasm.as_slice(), ());
     let client = ConstantProductPoolClient::new(&env, &contract_address);
 
     env.cost_estimate().budget().reset_unlimited();
+    env.cost_estimate().disable_resource_limits();
 
     client.do_cross_contract_work(&helper_address, &100);
 }
