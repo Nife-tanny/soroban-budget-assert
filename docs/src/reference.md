@@ -21,7 +21,7 @@ fn unit_test() {
 #[budget_cpu_lt(850000)]
 fn result_test() -> Result<(), Box<dyn std::error::Error>> {
     let env = Env::default();
-    let wasm = std::fs::read("../target/wasm32-unknown-unknown/release/my_contract.wasm")?;
+    let wasm = std::fs::read("../target/wasm32v1-none/release/my_contract.wasm")?;
     // ... the check runs after `Ok(())` is evaluated, and it is still the test's value ...
     Ok(())
 }
@@ -55,7 +55,7 @@ fn test_expensive_function() {
     let env = Env::default();
 
     let wasm = std::fs::read(
-        "../target/wasm32-unknown-unknown/release/my_contract.wasm",
+        "../target/wasm32v1-none/release/my_contract.wasm",
     ).expect("build the WASM first");
     let contract_id = env.register_contract_wasm(None, wasm.as_slice());
     let client = MyContractClient::new(&env, &contract_id);
@@ -190,7 +190,7 @@ fn test_memory_budget() {
     let env = Env::default();
 
     let wasm = std::fs::read(
-        "../target/wasm32-unknown-unknown/release/my_contract.wasm",
+        "../target/wasm32v1-none/release/my_contract.wasm",
     ).expect("build the WASM first");
     let contract_id = env.register_contract_wasm(None, wasm.as_slice());
     let client = MyContractClient::new(&env, &contract_id);
@@ -863,11 +863,11 @@ The real failure mode here is drift, not the one-time gap this page used to have
 
 Configuration precedence: a CLI flag overrides the `budget.toml` value. If neither provides `network`/`source`, the command exits with an error naming the missing field.
 
-External requirements: the `stellar` CLI on `PATH`, a funded source identity on the target network, and the `wasm32-unknown-unknown` Rust target installed. `--replay` is the exception — it needs none of the network tooling (no `stellar`, no `curl`), only the workspace itself. `--derive-limits`, `--init`, and `--record-baseline`/`--check-baseline` need neither network tooling nor a funded identity either, since none of them build, deploy, or simulate anything.
+External requirements: the `stellar` CLI on `PATH`, a funded source identity on the target network, and the `wasm32v1-none` Rust target installed. `--replay` is the exception — it needs none of the network tooling (no `stellar`, no `curl`), only the workspace itself. `--derive-limits`, `--init`, and `--record-baseline`/`--check-baseline` need neither network tooling nor a funded identity either, since none of them build, deploy, or simulate anything.
 
 ### Required release profile for comparable measurements
 
-`cargo budget-report` builds each contract with `cargo build --target wasm32-unknown-unknown --release`, so the workspace `[profile.release]` is part of the measured input. To compare against the figures published by this project, use the same profile:
+`cargo budget-report` builds each contract with `cargo build --target wasm32v1-none --release`, so the workspace `[profile.release]` is part of the measured input. To compare against the figures published by this project, use the same profile:
 
 {% code title="Cargo.toml" %}
 ```toml
@@ -1144,7 +1144,7 @@ total.### In scope
 | `CPU Instructions` | `resources.instructions` — metered CPU instruction count |
 | `Read Bytes` | `resources.disk_read_bytes` — bytes read from disk-backed ledger entries |
 | `Write Bytes` | `resources.write_bytes` — bytes written to ledger entries |
-| `WASM Bytes` | Compiled WASM binary size — the file size on disk after `cargo build --target wasm32-unknown-unknown --release` |
+| `WASM Bytes` | Compiled WASM binary size — the file size on disk after `cargo build --target wasm32v1-none --release` |
 | `Memory Bytes` (Protocol 22+) | `result.cost.memBytes` — memory-bytes cost from the Protocol 22 JSON-RPC `cost` block; absent on older protocol responses |
 
 These four (or five on Protocol 22+) quantities are *inputs* to the **non-refundable resource fee**. They are not the whole of it.
@@ -1200,17 +1200,18 @@ answering "how much will my users pay".
 
 ## ⚙️ Supported Versions & Compatibility
 
-* **Supported SDK Version**: `soroban-sdk` = `"22.0.11"` (specifically tested/resolved to `22.0.11` in `Cargo.lock`)
-* **Supported XDR Version**: `stellar-xdr` = `"22.1.0"` (used for decoding transaction simulation responses)
-* **Corresponding Stellar Protocol**: **Protocol 22**
+* **Supported SDK Version**: `soroban-sdk` = `"27.0.3"` (specifically tested/resolved to `27.0.6` in `Cargo.lock`)
+* **Supported XDR Version**: `stellar-xdr` = `"27.0.0"` (used for decoding transaction simulation responses)
+* **Corresponding Stellar Protocol**: **Protocol 27**
 
 ### Compatibility Matrix
 
 | SDK Version | Protocol Version | Status | Notes |
 | :--- | :--- | :--- | :--- |
 | **`< 22.0.0`** | `< 22` | **Untested** | Older protocols may use different transaction/resource schemas. |
-| **`22.0.x`** | `22` | **Supported** | Matches pinned manifest dependencies (`soroban-sdk` `22.0.11`, `stellar-xdr` `22.1.0`). |
-| **`>= 23.0.0`** | `>= 23` | **Untested** | Future protocol upgrades or XDR schema changes (e.g. key/field renames) may break parsing. |
+| **`22.0.x`** | `22` | **Untested** | Previously supported; superseded by SDK 27 workspace baseline. |
+| **`23.0.x` – `26.0.x`** | `23` – `26` | **Untested** | Not pinned in the workspace; may work but are untested. |
+| **`27.0.x`** | `27` | **Supported** | Matches pinned manifest dependencies (`soroban-sdk` `27.0.3`, `stellar-xdr` `27.0.0`). |
 
 ## `budget.toml` schema reference
 
@@ -1228,7 +1229,7 @@ This is the complete reference for the `budget.toml` file. It was verified again
 |---|---|---|---|---|
 | `network` | string | no | none | Target network for deploy/simulate (`"testnet"`, `"futurenet"`, `"local"`, or a custom network from your Stellar CLI config). Falls back to `--network`; if neither is set the run aborts with `missing --network or budget.toml network field`. |
 | `source` | string | no | none | Stellar source identity used for deployment fees and as simulation source. Falls back to `--source`; if neither is set the run aborts. |
-| `tolerance` | number (fraction) | no | `0.10` | Default regression tolerance for `--check-baseline`. Overridable per function (see below) and by `--tolerance`. |
+| `tolerance` | number (fraction) **or** percentage string (`"10%"`) | no | `0.10` | Default regression tolerance for `--check-baseline`. Overridable per function (see below) and by `--tolerance`. Resolved as: per-function `tolerance` → `--tolerance` flag → this key → `0.10`. |
 | `[margin]` | table | no | none | Per-metric margin multipliers consumed only by `--derive-limits`. See [below](#margin-deriving-tier-a-limits). |
 | `[scenarios.<name>]` | table of tables | no | none | Function-to-scenario mapping consumed only by `--derive-limits`. See [below](#scenariosnamemapping-functions-to-derived-scenario-limits). |
 | `[functions.<name>]` | table of tables | no | none | Per-function configuration. See [below](#functionsnameper-function-configuration). |
@@ -1263,12 +1264,14 @@ The section key `<name>` must match the **exported WASM function name exactly** 
 | `cpu_limit` | integer (u64) | no | none | Inclusive upper bound on the measured `CPU Instructions` metric in `--check` mode. |
 | `read_limit` | integer (u64) | no | none | Inclusive upper bound on `Read Bytes`. |
 | `write_limit` | integer (u64) | no | none | Inclusive upper bound on `Write Bytes`. |
-| `tolerance` | number (fraction) | no | global tolerance | Per-function regression-tolerance override applied during `--check-baseline`. Takes precedence over `--tolerance`. |
+| `tolerance` | number (fraction) **or** percentage string (`"5%"`) | no | global tolerance | Per-function regression-tolerance override applied during `--check-baseline`. Takes precedence over `--tolerance`. |
 
 - A missing `*_limit` field means that metric is **reported but not enforced**.
 - Limits are inclusive: a measurement equal to the limit passes.
 - There is deliberately no limit field for `WASM Bytes` — binary size is reported but can never be enforced through this file.
 - **Unknown keys inside a `[functions.*]` block produce a parse error** (e.g. a typo like `cpu_lmit` fails the run instead of silently doing nothing).
+- A malformed `tolerance` value (neither a number nor a percentage string, e.g. `tolerance = "abc"`) is a configuration error that fails the run before any simulation starts.
+- The tolerance **actually applied** to each measurement is shown in the `--check-baseline` report: the text table prints a `tolerance` column, and the JSON output carries a `tolerance` field on every `passes`, `improvements`, and `regressions` entry. This is what makes a passing result interpretable — you can see whether a function was judged under its own override, the global value, or the default.
 - Under `--check`, a configured function whose *simulation fails* counts as a check failure even when none of its limits are set, so a broken invocation cannot masquerade as a pass.
 
 #### Typed argument specs
@@ -1424,3 +1427,14 @@ Effects of this file:
 - `withdraw` has an entry but no `*_limit` fields, so its metrics are reported and it participates in `--check`'s fail-on-simulation-error rule, but no metric is enforced.
 - If `amm-pool-contract` were renamed tomorrow, every section above would keep working unchanged except `[scenarios.full_workflow]`, whose `package` value must match the annotation used by Tier A tests.
 - If `initialize` had been misspelled (e.g. `[functions.initialise]`), nothing would error and nothing would fail: the orphaned entry would be ignored, `initialize` would run unconfigured with no arguments, and none of its metrics would be enforced — the only symptom is missing rows in a later report.
+### `--rpc-url`
+Override the RPC URL for Soroban CLI invocation.
+
+### `--network-passphrase`
+Override the network passphrase for Soroban CLI invocation.
+
+### `--no-deploy-cache`
+Bypass deploying cache when running budget report.
+
+### `--source-secret`
+Supply a stellar secret key (S...) for deploy and invoke.
