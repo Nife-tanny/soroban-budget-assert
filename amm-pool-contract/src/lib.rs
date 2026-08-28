@@ -248,6 +248,20 @@ impl ConstantProductPool {
         env.storage().instance().extend_ttl(threshold, extend_to);
     }
 
+    /// Extends the TTL of a single persistent storage entry so it is not
+    /// evicted from the ledger before `extend_to` ledgers from now,
+    /// provided the current TTL is below `threshold` ledgers.
+    ///
+    /// Writes a dummy value on first call so the key exists, then extends.
+    /// Isolated for measurement — same pattern as `extend_instance_ttl`.
+    pub fn extend_persistent_ttl(env: Env, threshold: u32, extend_to: u32) {
+        let key = symbol_short!("pttl");
+        env.storage().persistent().set(&key, &0i128);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, threshold, extend_to);
+    }
+
     pub fn do_expensive_work(env: Env, n: u32) -> u32 {
         let mut result: u32 = 0;
 
@@ -452,6 +466,48 @@ impl ConstantProductPool {
     pub fn do_event_heavy_work(env: Env, n: u32) {
         for i in 0..n {
             env.events().publish(("ev",), i);
+        }
+    }
+
+    /// Writes `n` entries to persistent storage, isolating the storage-write
+    /// cost for persistent-durability entries. Each key is a unique composite
+    /// `(symbol, u32)` and each value is a small fixed-size `i128`.
+    ///
+    /// No compute, event, or authorization work is mixed in, so the measured
+    /// cost is dominated by the storage write operations.
+    pub fn do_write_persistent(env: Env, n: u32) {
+        for i in 0..n {
+            env.storage()
+                .persistent()
+                .set(&(symbol_short!("wp"), i), &(i as i128));
+        }
+    }
+
+    /// Writes `n` entries to temporary storage, isolating the storage-write
+    /// cost for temporary-durability entries. Each key is a unique composite
+    /// `(symbol, u32)` and each value is a small fixed-size `i128`.
+    ///
+    /// No compute, event, or authorization work is mixed in, so the measured
+    /// cost is dominated by the storage write operations.
+    pub fn do_write_temporary(env: Env, n: u32) {
+        for i in 0..n {
+            env.storage()
+                .temporary()
+                .set(&(symbol_short!("wt"), i), &(i as i128));
+        }
+    }
+
+    /// Writes `n` entries to instance storage, isolating the storage-write
+    /// cost for instance-durability entries. Each key is a unique composite
+    /// `(symbol, u32)` and each value is a small fixed-size `i128`.
+    ///
+    /// No compute, event, or authorization work is mixed in, so the measured
+    /// cost is dominated by the storage write operations.
+    pub fn do_write_instance(env: Env, n: u32) {
+        for i in 0..n {
+            env.storage()
+                .instance()
+                .set(&(symbol_short!("wi"), i), &(i as i128));
         }
     }
 }
