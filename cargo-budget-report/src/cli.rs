@@ -30,7 +30,19 @@ pub struct BudgetReportArgs {
     #[arg(long)]
     pub source: Option<String>,
 
+    /// Permit the run to build and deploy against a non-disposable network.
+    ///
+    /// `cargo budget-report` deploys a contract and simulates calls against
+    /// it. Against testnet, futurenet, or a local network that is free and
+    /// throwaway. Against Stellar Mainnet it funds a source account and
+    /// pushes a contract using real funds. Without this flag the run stops
+    /// before building anything when the resolved network is Mainnet — or
+    /// when it cannot be recognised as disposable, which is treated the same
+    /// way rather than assumed safe.
     #[arg(long, default_value_t = false)]
+    pub allow_mainnet: bool,
+
+    #[arg(long, default_value_t = false, conflicts_with = "csv")]
     pub json: bool,
 
     /// Enforce per-function limits declared in `budget.toml`.
@@ -49,18 +61,37 @@ pub struct BudgetReportArgs {
     pub csv: bool,
 
     /// Write a new resource-usage baseline snapshot to this path and exit.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "check_baseline")]
     pub record_baseline: Option<String>,
 
     /// Check current measurements against an existing baseline snapshot at
     /// this path, applying the configured regression tolerance.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "record_baseline")]
     pub check_baseline: Option<String>,
 
     /// Override the regression tolerance (e.g. "0.10" for 10%). Takes
     /// precedence over `tolerance` in `budget.toml`.
     #[arg(long)]
     pub tolerance: Option<String>,
+
+    /// Render the `--check-baseline` comparison as a GitHub-flavored
+    /// Markdown diff table instead of the plain-text one.
+    ///
+    /// Each row shows baseline, current, absolute change, and percentage
+    /// change; direction is an ASCII marker (not colour) so it survives CI
+    /// logs and step summaries, which is this format's main destination.
+    /// Only meaningful with `--check-baseline`; ignored otherwise. `--json`
+    /// wins if both are passed.
+    #[arg(long, default_value_t = false)]
+    pub markdown: bool,
+
+    /// Drop rows whose value is unchanged from the baseline in the
+    /// `--check-baseline` comparison.
+    ///
+    /// In the Markdown output the default instead collapses unchanged rows
+    /// into a `<details>` block; this flag omits them from both formats.
+    #[arg(long, default_value_t = false)]
+    pub hide_unchanged: bool,
 
     /// Suppress non-essential progress messages and warnings on stderr.
     ///
@@ -142,4 +173,27 @@ pub struct BudgetReportArgs {
     /// `tier-a-limits.provenance.md` for `tier-a-limits.env`).
     #[arg(long, value_name = "PATH")]
     pub provenance_out: Option<String>,
+
+    /// Maximum number of attempts (including the first) for deploy,
+    /// invoke-build, and simulate-RPC calls before giving up. `1`
+    /// disables retry entirely. Overrides `retry.max_attempts` in
+    /// `budget.toml`; defaults to 4.
+    #[arg(long, value_name = "N")]
+    pub max_retry_attempts: Option<u32>,
+
+    /// Initial backoff, in seconds, before the first retry. Doubles on
+    /// each subsequent attempt (2 → 4 → 8). Overrides
+    /// `retry.initial_backoff_secs` in `budget.toml`; defaults to 2.
+    #[arg(long, value_name = "SECS")]
+    pub retry_backoff_secs: Option<u64>,
+
+    /// Emit the report as a single self-contained HTML page instead of a
+    /// table, JSON, or CSV.
+    ///
+    /// The page has no external CSS, scripts, or fonts, so it renders
+    /// correctly from a `file://` URL and from a downloaded CI artifact.
+    /// Each row shows the same values as `--json` for the same run; in
+    /// `--check` mode rows also show their limit and pass/fail status.
+    #[arg(long, default_value_t = false)]
+    pub html: bool,
 }

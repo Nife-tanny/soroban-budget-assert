@@ -16,7 +16,7 @@ First off, thank you for considering contributing to `soroban-budget-assert`!
 1. Fork the repo and create your branch from `main`.
 2. If you've added code that should be tested, add tests.
 3. If you've changed APIs, update the documentation.
-4. Add a changelog entry in `CHANGELOG.md` for any user-visible change.
+4. Add a changelog entry in `CHANGELOG.md` under the `## Unreleased` section for any user-visible change.
 5. Ensure the test suite passes.
 6. Issue that pull request!
 
@@ -24,7 +24,7 @@ First off, thank you for considering contributing to `soroban-budget-assert`!
 
 ### All platforms
 - Install Rust and the Soroban CLI. The repository includes a `rust-toolchain.toml` file, so `rustup` will automatically install and use the correct toolchain and target when you run cargo commands.
-- Run `cargo test` in the workspace root to run macro tests.
+- Run `cargo test --workspace` in the workspace root to run the full workspace test suite.
 - Run `cargo run -p cargo-budget-report -- budget-report` (or `cargo build`) to test the CLI locally.
 
 ## Documentation
@@ -77,13 +77,19 @@ brew install pkg-config dbus
 
 Add the WASM target:
 ```bash
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 ```
 
 Install the Stellar CLI:
 ```bash
 cargo install --locked stellar-cli
 ```
+
+> `cargo-budget-report` still shells out to the `stellar` CLI for contract
+> deploy and invoke-build (checked at preflight). Moving these to native RPC
+> calls is tracked in [#123](https://github.com/Tollcraft/soroban-budget-assert/issues/123);
+> `--source-secret` / `STELLAR_SECRET_KEY` is the signing-key mechanism that
+> change will use.
 
 ### Windows
 
@@ -97,7 +103,7 @@ Install prerequisites:
 Open **PowerShell** (or Git Bash) and run:
 ```powershell
 # Add the WASM target
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 
 # Install the Stellar CLI
 cargo install --locked stellar-cli
@@ -110,7 +116,7 @@ stellar keys generate alice --network testnet --fund
 
 Build the WASM contract and run tests:
 ```powershell
-cargo build -p amm-pool-contract --release --target wasm32-unknown-unknown
+cargo build -p amm-pool-contract --release --target wasm32v1-none
 cargo test --workspace
 ```
 
@@ -134,11 +140,28 @@ stellar --version
 cargo --version
 ```
 
-## Code Quality Standards
-Before submitting a pull request, please ensure our quality standards by running the following commands locally:
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace`
+## Code Quality Standards & Lint/Formatting Configuration
+
+This workspace configures both `clippy.toml` and `rustfmt.toml` at the repository root to enforce consistent code styling and static analysis rules across all development environments and CI pipelines.
+
+### Linting (`clippy.toml`)
+- **Purpose**: `clippy.toml` pins tunable lint thresholds (such as `too-many-arguments-threshold = 7`, `type-complexity-threshold = 250`, `enum-variant-name-threshold = 3`, and `single-char-binding-names-threshold = 4`) to upstream defaults.
+- **Rationale**: Freezing these thresholds ensures that future Rust/Clippy toolchain updates will not trigger unexpected lint failures on unchanged source code.
+
+### Formatting (`rustfmt.toml`)
+- **Purpose**: `rustfmt.toml` specifies workspace code style rules, including `max_width = 100`, Unix line endings (`newline_style = "Unix"`), 4-space indentation (`tab_spaces = 4`), import reordering, and derive merging.
+- **Toolchain Note**: The repository pins stable `1.91.0` in `rust-toolchain.toml`. Several configured options (`style_edition`, `force_explicit_abi`, `fn_params_layout`, `match_arm_leading_pipes`, `use_field_init_shorthand`, `use_try_shorthand`) are nightly-only in `rustfmt` and are silently ignored when running `cargo fmt` on the pinned stable 1.91.0 toolchain.
+
+### Editor Setup
+Most Rust-enabled editors (such as VS Code with `rust-analyzer`) automatically detect `rustfmt.toml` and `clippy.toml` at the workspace root when formatting on save. If your editor formats using a different style, ensure rust-analyzer is configured to use cargo/workspace commands (`"rust-analyzer.rustfmt.overrideCommand": ["cargo", "fmt", "--", "--config-path", "rustfmt.toml"]`).
+
+### Pre-Push Verification Checklist
+Before submitting a pull request, run the following commands locally from the workspace root to ensure all quality gates pass:
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
 
 Please follow the styling and architectural patterns already used in the codebase.
 
@@ -179,3 +202,32 @@ This runs `cargo fmt --all -- --check` before every commit and blocks the
 commit if formatting is off. Fix with `cargo fmt --all` and commit again.
 The hook only checks formatting — clippy and tests are intentionally left
 to CI and the manual pre-PR checklist above, since they take longer to run.
+
+## Regenerating measurements
+
+The repository includes a discoverable script to regenerate all local measurement
+harnesses in a single command. This is useful for keeping `MEASUREMENTS.md`
+up‑to‑date after SDK upgrades or contract changes.
+
+```bash
+# Run all local measurement harnesses and capture their output.
+# Results are written to ./measurements-out/ for review.
+./scripts/regenerate-measurements.sh
+```
+
+The script:
+- Scans `*/tests/*.rs` for the marker comment `// @measure <mode>[:<feature>[:<test_name>]]`.
+- Runs harnesses marked as `local` (the default) and captures their stdout/stderr.
+- Lists any `testnet` harnesses that require a funded Soroban testnet identity – these are
+  skipped automatically; you can run them manually with the appropriate `stellar`
+  CLI commands as documented in the corresponding measurement sections.
+
+If you add a new measurement harness, include the marker comment at the top of the file.
+The format is `// @measure <mode>[:<feature>[:<test_name>]]`:
+
+- `// @measure local` – run automatically, no special features needed.
+- `// @measure local:sdk20` – run with `--features sdk20`.
+- `// @measure local:sdk22:calibrate_gap` – run with `--features sdk22`, only the named test.
+
+The script will discover it without any additional configuration.
+
