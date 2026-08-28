@@ -1886,7 +1886,9 @@ fn run() -> Result<i32> {
                     .map(|e| format!("  - [{}] {}", e.location, e.message))
                     .collect::<Vec<_>>()
                     .join("\n");
-                anyhow::bail!("budget.toml validation failed:\n{report}");
+                return Err(Error::Message(format!(
+                    "budget.toml validation failed:\n{report}"
+                )));
             }
         }
     }
@@ -3392,7 +3394,7 @@ write_limit = 1000
         assert_eq!(csv, "package,function,metric,value\n");
     }
 
-#[test]
+    #[test]
     fn build_utc_timestamp_success() {
         let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000);
         let ts = build_utc_timestamp(now).expect("should return timestamp");

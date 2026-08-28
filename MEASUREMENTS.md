@@ -107,13 +107,22 @@ The network figure column requires a separate `cargo-budget-report` run on Sorob
 
 ### How to regenerate
 
+The quickest way is to run the one-command regeneration script, which discovers all harnesses via `@measure` markers and runs the local ones:
+
+```bash
+./scripts/regenerate-measurements.sh --out ./measurements-out
+```
+
+For a specific SDK version, follow these steps:
+
 1. Pin the desired soroban-sdk version in `amm-pool-contract/Cargo.toml` (both `[dependencies]` and `[dev-dependencies]`).
 2. Run `cargo update -p soroban-sdk` to resolve.
 3. Build the WASM: `cargo build --target wasm32v1-none --release -p amm-pool-contract`.
 4. Collect local estimate: `cargo test -p amm-pool-contract calibrate_gap -- --nocapture`.
 5. For the network figure, deploy the WASM to testnet and run `cargo run --bin cargo-budget-report -- --network testnet` (see [Network simulation in mechanics.md](docs/src/mechanics.md#tier-b-network-simulation-cargo-budget-report)).
 6. Compute delta = (local − network) / network and add a row to the table above.
-A reusable script at `amm-pool-contract/calibrate_gap.ps1` automates steps 1–4 for a predefined list of SDK versions.
+
+A reusable PowerShell script at `amm-pool-contract/calibrate_gap.ps1` automates steps 1–4 for a predefined list of SDK versions.
 
 ### Cross-version comparison (local only)
 
