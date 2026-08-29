@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Consolidate Windows setup instructions (issue #229).** Made `CONTRIBUTING.md#windows` the single authoritative reference for Windows environment setup (including prerequisites, PowerShell/Git Bash choices, `wasm32v1-none` target, and PATH troubleshooting) and replaced the duplicate instructions in `docs/src/developer_guide.md` with a direct link.
 - Tier A reconciliation comments in `amm-pool-contract/tests/budget_test.rs` are now auto-generated from `tier-a-limits.provenance.md`, not transcribed by hand. Re-derive the artifact instead of editing the test inline when a limit needs to change.
 - `src/lib.rs` re-exports `module_25` alongside the existing `module_1`.
 
