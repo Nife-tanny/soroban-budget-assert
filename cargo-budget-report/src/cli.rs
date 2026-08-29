@@ -10,6 +10,10 @@ pub enum CargoCli {
     BudgetReport(BudgetReportArgs),
 }
 
+/// Conservative default for `--concurrency` (functions in flight per
+/// package). See the flag help text for the rationale.
+pub const DEFAULT_CONCURRENCY: usize = 4;
+
 /// CLI arguments for `cargo budget-report`.
 ///
 /// All fields are optional; missing values fall back to the corresponding
@@ -196,4 +200,16 @@ pub struct BudgetReportArgs {
     /// `--check` mode rows also show their limit and pass/fail status.
     #[arg(long, default_value_t = false)]
     pub html: bool,
+
+    /// Maximum number of contract functions to simulate concurrently per
+    /// package. Defaults to DEFAULT_CONCURRENCY.
+    ///
+    /// Deploys are always sequential; this bounds only the read-only
+    /// per-function simulations, which share no state and are safe to run
+    /// in parallel. Keep it modest: public Soroban RPC endpoints
+    /// rate-limit, and a single rate-limited request backs off (2s -> 4s ->
+    /// 8s) without stalling unrelated requests. `1` reproduces the exact
+    /// sequential behaviour.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_CONCURRENCY)]
+    pub concurrency: usize,
 }
