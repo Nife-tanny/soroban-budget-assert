@@ -403,6 +403,10 @@ resolved at test runtime instead; a missing file then panics the test (it is
 never treated as "no limit"). At runtime the file is re-read per assertion, so
 the mechanism is thread-safe and needs no `unsafe std::env::set_var`.
 
+The checked-in `tier-a-limits.env` file is the recommended source for
+Tier A limits. Its provenance, refresh procedure, and staleness-detection
+guidance live in [`tier-a-limits.provenance.md`](../../tier-a-limits.provenance.md).
+
 ## Soroban Budget API
 
 The macros and manual tests interact with the Soroban budget API through `env.cost_estimate().budget()`. The key methods are:
@@ -818,9 +822,11 @@ Consumed only by `cargo budget-report --derive-limits`; ignored by every other m
 
 Each field is individually optional *at parse time*, but the block is usable only when **complete**: if no `--margin-*` flags are given, an incomplete `[margin]` block produces the same `no margin supplied` error as no block at all. All four values must be finite and `>= 1.0`; a sub-1.0 margin would tighten the limit below the measured Tier B value and is rejected. No default is ever picked silently — margins are treated as audit-trail data.
 
+For the current margin values, the Tier A limits they produce, and the protocol version the numbers correspond to, see [`tier-a-limits.provenance.md`](../../tier-a-limits.provenance.md).
+
 ### `scenarios.<name>`: mapping functions to derived scenario limits
 
-Consumed only by `--derive-limits`. Each scenario sums the Tier B values of its component functions into a single Tier A limit under one environment-variable key.
+Consumed only by `--derive-limits`. Each scenario sums the Tier B values of its component functions into a single Tier A limit under one environment-variable key. See [`tier-a-limits.provenance.md`](../../tier-a-limits.provenance.md) for the current derived limits and their refresh procedure.
 
 | Field | Type | Required | Default | Effect |
 |---|---|---|---|---|
